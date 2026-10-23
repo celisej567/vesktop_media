@@ -96,11 +96,28 @@ The coefficients are BT.601 limited range, scaled so that grey stays exactly 128
 Everything that touches a device runs on the camera's own thread, never on the "Voice" worker or the JS thread:
 
 * opening a V4L2 device takes 0.5 to 2 s;
-* **enumerating devices opens every one of them**, which stalls or kills a capture that is running (measured:
-  frames stop, each enumeration takes 3 to 7 s).
+* **libwebrtc's device enumeration probes every camera**: it finds the modes with a `VIDIOC_TRY_FMT` per format and
+  size (about 200 per node), and each is a UVC probe request to the camera. That stalls or kills a capture that is
+  running (measured: frames stop, each enumeration takes 3 to 7 s), and it made a camera that another program (OBS)
+  was streaming drop off the USB bus and come back, again and again, while Vesktop was open (kernel log: `Failed to
+  set UVC probe control`, `USB disconnect`, in bursts that matched the enumerations).
 
-So the device list is cached. It is rebuilt only while nothing captures, and only when the set of
-`/sys/class/video4linux` nodes (name + node, read without opening a device) changed. `getVideoInputDevices` and the
+So the module lists cameras itself (`ListDevices`): every `/dev/videoN` is opened once for reading, and only
+`VIDIOC_QUERYCAP`, `ENUM_FMT`, `ENUM_FRAMESIZES` and `ENUM_FRAMEINTERVALS` are used. They answer from the driver's
+descriptors and send nothing to the camera. A node whose `device_caps` have video capture is a camera (the nodes next
+to it carry metadata); its guid is its `bus_info` and its name the `card`, as libwebrtc names it, so a guid still opens
+the device; a camera with two nodes is listed once. The modes (size and real frame rates; a range, as v4l2loopback
+reports, becomes the usual sizes inside it) come from the same queries. `Camera::Start` picks the mode closest to the
+request from that list instead of asking libwebrtc, and whether a camera has an autofocus control (a request to the
+camera) is asked only when the camera options are opened.
+
+The device list is cached. It is rebuilt only while nothing captures, and only when what is in
+`/sys/class/video4linux` changed (the nodes, their names, and for v4l2loopback nodes such as OBS Virtual Camera their
+`state` and `format`, all read without opening a device). The virtual camera's state counts because its node exists
+all the time but has formats only while OBS feeds it: with the nodes alone it stayed out of the list until a restart.
+A change has to stay for one more poll (2 s), and enumerations are at least 5 s apart: a camera that is plugging in,
+resetting or being taken by another program makes its nodes come and go every few seconds, and opening it meanwhile
+(power up, power down) could only make that worse. `getVideoInputDevices` and the
 device change callback report the cache; nothing is reported before the first enumeration finished, because an empty
 list would look to Discord as if every camera had been unplugged.
 
@@ -114,8 +131,16 @@ A device captures while something uses it:
 
 Each device has one frame source, shared by all its users and kept for the process lifetime. When several users
 want a device, the largest requested size and the highest frame rate win (default 1280×720 at 30 fps); a change
-restarts the capture in the new mode. A device that was just closed can still be busy for a moment, so starting is
-retried three times, 500 ms apart.
+restarts the capture in the new mode. A device that was just closed by us can still be busy for a moment, so then
+starting is retried three times, 500 ms apart; otherwise a failure means another program holds the camera (each
+request to such a camera is a probe of it), so there is one attempt, and `Apply()` does not try that device again for
+15 s.
+
+**Changing the selected camera in a call.** `Camera::SetDevice` starts the new camera and stops the old one, and
+tells the calls (`Connection::OnVideoDeviceSelected`, through the callback `Engine` sets): a call takes its frame
+source from the selected camera when its video send is set up (`UpdateVideoSend`), so without being told it went on
+sending the old camera (for 10 to 25 seconds in a real call) until something else made Discord change its video, and
+then switched abruptly. A Go Live stream sends its own source and ignores the selection.
 
 ### Capture options (Vesktop extension)
 
@@ -123,7 +148,8 @@ retried three times, 500 ms apart.
   autofocus control (`null` = none).
 * `setVideoInputDeviceOptions(id, {width, height, frameRate, autofocus})`: **these win over what connections ask
   for**. 0 or missing = whatever the users ask; `autofocus` null = leave it. Autofocus is set with
-  `V4L2_CID_FOCUS_AUTO`, also on a capture that keeps running.
+  `V4L2_CID_FOCUS_AUTO`, when a capture of that camera starts and on one that keeps running; a camera that this module
+is not capturing (it may be OBS's) is not touched when the options are applied at start-up.
 
 Vesktop keeps the chosen options per camera in its settings and applies them at start-up; a device stream can use
 its own options for that stream, and the saved ones come back when it ends ([08](08-vesktop.md)).

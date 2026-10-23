@@ -1,5 +1,7 @@
 #include "common/js.h"
 
+#include <atomic>
+
 #include "common/log.h"
 
 namespace vv {
@@ -22,6 +24,31 @@ void CallJs(Napi::Env env, Napi::Function fn, JsCallback::ArgsBuilder* data)
 
 } // namespace
 
+void JsEnvInit(Napi::Env env)
+{
+    auto state = std::make_shared<EnvState>();
+    // read back by CurrentEnvState; freed with the environment
+    env.SetInstanceData(new std::shared_ptr<EnvState>(state));
+    // When Node tears the environment down (a window reloading or closing, Vesktop restarting) it closes every
+    // thread-safe function of it itself, and only then finalizes our objects; releasing or calling one afterwards is a
+    // use of a destroyed mutex, which aborted the renderer (exit code 134) when "restart" was pressed. Cleanup hooks
+    // run in reverse order of their registration: the ones of the thread-safe functions (registered later, as they
+    // are created) run before this one, and the finalizers of our objects after all of them
+    napi_add_env_cleanup_hook(
+        env, [](void* arg) {
+            auto* held = static_cast<std::shared_ptr<EnvState>*>(arg);
+            (*held)->closing = true;
+            delete held;
+        },
+        new std::shared_ptr<EnvState>(state));
+}
+
+std::shared_ptr<EnvState> CurrentEnvState(Napi::Env env)
+{
+    auto* held = env.GetInstanceData<std::shared_ptr<EnvState>>();
+    return held ? *held : std::make_shared<EnvState>();
+}
+
 std::shared_ptr<JsCallback> JsCallback::Create(const Napi::Value& fn, const char* name)
 {
     if (fn.IsEmpty() || !fn.IsFunction()) return nullptr;
@@ -29,16 +56,17 @@ std::shared_ptr<JsCallback> JsCallback::Create(const Napi::Value& fn, const char
     auto tsfn = Napi::ThreadSafeFunction::New(env, fn.As<Napi::Function>(), name, 0, 1);
     // Callbacks must not keep the process alive (fake-sfu exits on its own, Electron on window close)
     tsfn.Unref(env);
-    return std::shared_ptr<JsCallback>(new JsCallback(std::move(tsfn), name));
+    return std::shared_ptr<JsCallback>(new JsCallback(std::move(tsfn), name, CurrentEnvState(env)));
 }
 
 JsCallback::~JsCallback()
 {
-    tsfn_.Release();
+    if (!env_->closing) tsfn_.Release();
 }
 
 void JsCallback::Call(ArgsBuilder build)
 {
+    if (env_->closing) return;
     auto* data = new ArgsBuilder(std::move(build));
     auto status = tsfn_.NonBlockingCall(data, CallJs);
     if (status != napi_ok) delete data;

@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,17 @@ namespace vv {
 
 using json = nlohmann::json;
 using Bytes = std::vector<uint8_t>;
+
+// What the module knows of one Node environment. A renderer process runs the module in a new environment each time
+// the page is loaded again (the process, and with it the module's statics, stay), and an old environment is torn down
+// while a new one already works: "closing" is therefore a state of one environment, not of the process
+struct EnvState {
+    std::atomic<bool> closing{false};
+};
+// Once per environment, from the module's Init: notices the end of that environment (see js.cc)
+void JsEnvInit(Napi::Env env);
+// The state of the environment `env`
+std::shared_ptr<EnvState> CurrentEnvState(Napi::Env env);
 
 class JsCallback {
 public:
@@ -36,10 +48,11 @@ public:
     JsCallback& operator=(const JsCallback&) = delete;
 
 private:
-    explicit JsCallback(Napi::ThreadSafeFunction tsfn, std::string name)
-        : tsfn_(std::move(tsfn)), name_(std::move(name)) {}
+    explicit JsCallback(Napi::ThreadSafeFunction tsfn, std::string name, std::shared_ptr<EnvState> env)
+        : tsfn_(std::move(tsfn)), name_(std::move(name)), env_(std::move(env)) {}
 
     Napi::ThreadSafeFunction tsfn_;
+    std::shared_ptr<EnvState> env_; // the environment of tsfn_: once it closes, Node has closed tsfn_ too
     std::string name_;
 };
 

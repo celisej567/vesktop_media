@@ -74,6 +74,8 @@ public:
 
     // Video send
     void SetVideoBroadcast(bool broadcast);
+    // The selected camera changed (Camera::SetDevice): a call sends the new one
+    void OnVideoDeviceSelected();
     void SetDesktopSource(const json& options); // setDesktopSourceWithOptions
     void ClearDesktopSource();
     // Go Live with a camera (+ microphone): {videoInputDeviceId, audioInputDeviceId}

@@ -128,6 +128,10 @@ void Engine::Initialize(const json& options)
     dataDirectory_ = dir.empty() ? std::filesystem::temp_directory_path().string() : dir;
     fakeAudio_ = vv::Get(options, "useFakeAudioCapture", false);
     Camera::Get().SetFake(vv::Get(options, "useFakeVideoCapture", false));
+    Camera::Get().SetSelectionChangedCallback([this] {
+        std::lock_guard lock(connectionsMutex_);
+        for (auto* c : connections_) c->OnVideoDeviceSelected();
+    });
     // a JS preview sink on the camera's guid starts the camera
     VideoSinks::Get().SetObserver([](const std::string& streamId, bool attached) { Camera::Get().OnPreviewSinkChanged(streamId, attached); });
     Camera::Get().Refresh(); // first enumeration, on the camera thread

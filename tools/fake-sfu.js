@@ -57,6 +57,13 @@ const SCREEN_NODE = opt("--screen");
 // --expect-source-end: the screen source goes away during the test; setOnDesktopSourceEnded must fire
 const EXPECT_SOURCE_END = args.includes("--expect-source-end");
 let sourceEnded = false;
+// --switch-camera: the selected camera is changed during the call (voice.setVideoInputDevice); the call must send
+// the new one at once (its own video report names the new camera), not when something else changes its video
+const SWITCH_CAMERA = args.includes("--switch-camera");
+let cameraSwitchedAt = 0, cameraSwitchedMs = null;
+// --no-destroy: the connection is not destroyed before exiting, so Node's environment teardown (as when the window is
+// reloaded or Vesktop restarts) finalizes it: that once aborted the renderer (exit code 134)
+const NO_DESTROY = args.includes("--no-destroy");
 // --golive-camera: Go Live with a device (setGoLiveDevices) from the fake camera
 const GOLIVE_CAMERA = args.includes("--golive-camera");
 // --video-bitrate <bps>: Vesktop's override (transport option vesktopVideoBitrate) on the Go Live camera
@@ -375,6 +382,10 @@ sock.bind(0, "127.0.0.1", () => {
                     log("video callback", JSON.stringify(a));
                     const [userId, ssrc, streamId] = a;
                     video.callbacks.push(a);
+                    if (SWITCH_CAMERA && cameraSwitchedAt && userId === "111" && streamId === "Strobe Video Source 2" && cameraSwitchedMs === null) {
+                        cameraSwitchedMs = Date.now() - cameraSwitchedAt;
+                        log("camera switched: own video is now", streamId, "after", cameraSwitchedMs, "ms");
+                    }
                     if (userId === "111" && ssrc && selfVideoActive === null) selfVideoActive = a[3]?.every(l => l.active);
                     if (userId !== "222" || !ssrc || !streamId || !(RECV_VIDEO || LOOP_VIDEO)) return;
                     voice.setVideoOutputSink(streamId, image => {
@@ -465,6 +476,11 @@ sock.bind(0, "127.0.0.1", () => {
                                 conn.setTransportOptions({ remoteSinkWantsPixelCount: 921600, remoteSinkWantsMaxFramerate: 30 });
                             }, 1500);
                         conn.setVideoBroadcast(true);
+                        if (SWITCH_CAMERA)
+                            setTimeout(() => {
+                                cameraSwitchedAt = Date.now();
+                                voice.setVideoInputDevice("Strobe Video Source 2");
+                            }, 1500);
                     });
 
                 setTimeout(() => {
@@ -496,8 +512,12 @@ sock.bind(0, "127.0.0.1", () => {
                                 videoOk = videoOk && out?.framesEncoded > 0;
                             }
                         }
+                        if (SWITCH_CAMERA) {
+                            log("camera switch:", cameraSwitchedMs === null ? "not sent" : `${cameraSwitchedMs} ms`);
+                            videoOk = videoOk && cameraSwitchedMs !== null && cameraSwitchedMs < 1500;
+                        }
                         log("native logs in", workDir);
-                        conn.destroy();
+                        if (!NO_DESTROY) conn.destroy();
                         // a stream connection sends no microphone, only soundshare
                         const speaking = VAD_THRESHOLD < 0 && !SCREEN_NODE && !GOLIVE_CAMERA;
                         const ok = videoOk && counts.decryptFail === 0 && (speaking ? inbound?.packetsReceived > 0 : true);

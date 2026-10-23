@@ -31,6 +31,12 @@ if [ -n "$UNDEF" ]; then echo "unexpected undefined symbols:"; echo "$UNDEF"; ex
 echo "== noise models (RNNoise by default, DeepFilterNet, Standard = libwebrtc's suppression)"
 mkdir -p "$WORK/noise"
 VESKTOP_MEDIA_FAKE_MIC=speech ELECTRON_RUN_AS_NODE=1 timeout 60 "$ELECTRON" tools/noise-models.js "$MODULE" "$WORK/noise" || { echo "FAILED (noise models)"; exit 1; }
+echo "== exit with a connection that was not destroyed (Node's teardown finalizes it; once aborted the renderer on restart)"
+mkdir -p "$WORK/exit"
+ELECTRON_RUN_AS_NODE=1 timeout 20 "$ELECTRON" tools/exit-with-connection.js "$MODULE" "$WORK/exit" > /dev/null 2>&1 || { echo "FAILED (exit with a connection)"; exit 1; }
+echo "== two environments in one process: the callbacks of one go on after the other one ended (a page loaded again)"
+mkdir -p "$WORK/two"
+ELECTRON_RUN_AS_NODE=1 timeout 30 "$ELECTRON" tools/two-environments.js "$MODULE" "$WORK/two" > /dev/null 2>&1 || { echo "FAILED (two environments)"; exit 1; }
 echo "== speaking"
 check "onConnect|inbound|summary" --seconds 4
 # the reflected audio (user 222) must be reported as speaking: Discord's client shows who speaks from that callback
@@ -62,6 +68,8 @@ echo "== same, with the layer created inactive by JS (as Discord does)"
 check "late wants|viewers want|outbound video|video sink" --seconds 4 --video VP8 --wants-late --js-inactive
 echo "== send camera video with 2 simulcast layers (lower layer looped back)"
 check "outbound video|video sink" --seconds 3 --video VP8 --layers 2
+echo "== the selected camera changed during a call: the call sends the new one at once (not when something else changes its video)"
+check "camera switch|outbound video|video sink" --seconds 4 --video VP8 --switch-camera
 echo "== Go Live with a device (setGoLiveDevices, fake camera)"
 check "outbound video|video sink" --seconds 3 --video VP8 --golive-camera
 

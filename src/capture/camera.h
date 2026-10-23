@@ -14,6 +14,7 @@
 #include <modules/video_capture/video_capture.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -43,6 +44,8 @@ public:
     void GetDevices(std::function<void(const json&)> done);
 
     void SetDevice(const std::string& id); // guid, index, name or "disabled"
+    // Runs (on the thread that called SetDevice) when the selected camera changed. Set once, at start-up
+    void SetSelectionChangedCallback(std::function<void()> callback) { selectionChanged_ = std::move(callback); }
     std::string DeviceGuid() const;        // the camera in use (selected, or the first one)
     // guid of a device given by guid, index or name; "" if unknown
     std::string Resolve(const std::string& id) const;
@@ -51,7 +54,7 @@ public:
 
     // Vesktop extension: what a device can capture and per-device capture options
     // {formats: [{width, height, frameRate}], autofocus: bool | null (no such control)}
-    json Capabilities(const std::string& id) const;
+    json Capabilities(const std::string& id);
     // {width, height, frameRate, autofocus}; 0 / missing = whatever the users ask for; autofocus null = leave it
     void SetDeviceOptions(const std::string& id, const json& options);
 
@@ -75,6 +78,7 @@ private:
         std::string path;           // /dev/videoN
         std::vector<Format> formats; // largest first
         bool hasAutofocus = false;
+        bool autofocusKnown = false; // asked when somebody wants to know, see Capabilities()
     };
     struct DeviceOptions {
         int width = 0, height = 0, fps = 0;
@@ -100,6 +104,7 @@ private:
     std::string ResolveLocked(const std::string& id) const;
     webrtc::scoped_refptr<FrameSource> SourceLocked(const std::string& guid);
 
+    std::function<void()> selectionChanged_;
     std::atomic<bool> fake_{false};
     std::atomic<bool> ready_{false};
     std::atomic<bool> capturing_{false};
@@ -121,7 +126,13 @@ private:
 
     // camera thread only
     std::string signature_;
+    std::string pendingSignature_; // a changed one that has to stay for another poll
+    std::chrono::steady_clock::time_point lastEnumerated_{};
     std::map<std::string, Capture> captures_; // running, by guid
+    // a device that did not start (another program has it): not tried again for a while, so that an event that
+    // runs Apply() again does not become another request to the camera
+    std::map<std::string, std::chrono::steady_clock::time_point> busyUntil_;
+    std::map<std::string, std::chrono::steady_clock::time_point> lastStopped_;
 };
 
 } // namespace vv

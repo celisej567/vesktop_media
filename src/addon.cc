@@ -806,6 +806,7 @@ Napi::Value VesktopVoiceInfo(Info info)
 
 Napi::Object Init(Napi::Env env, Napi::Object exports)
 {
+    JsEnvInit(env);
     auto fn = [&](const char* name, Napi::Value (*f)(Info)) { exports.Set(name, Napi::Function::New(env, f, name)); };
 
     auto degradation = Napi::Object::New(env);

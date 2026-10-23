@@ -18,8 +18,10 @@ VideoSinks& VideoSinks::Get()
 
 void VideoSinks::SetAllocator(const Napi::Value& fn)
 {
-    if (fn.IsFunction()) allocator_ = Napi::Persistent(fn.As<Napi::Function>());
-    else allocator_.Reset();
+    if (allocator_ && allocatorEnv_ && allocatorEnv_->closing) allocator_.release(); // leaked on purpose, see the header
+    allocator_.reset();
+    allocatorEnv_ = CurrentEnvState(fn.Env());
+    if (fn.IsFunction()) allocator_ = std::make_unique<Napi::FunctionReference>(Napi::Persistent(fn.As<Napi::Function>()));
 }
 
 void VideoSinks::SetObserver(std::function<void(const std::string&, bool)> observer)
@@ -79,7 +81,8 @@ void VideoSinks::Deliver(const std::string& streamId, const webrtc::VideoFrame& 
                        rgba->data(), w * 4, w, h);
     cb->Call([this, rgba, w, h](Napi::Env env) {
         Napi::Value image;
-        if (!allocator_.IsEmpty()) image = allocator_.Call({Napi::Number::New(env, w), Napi::Number::New(env, h)});
+        if (allocator_ && !allocator_->IsEmpty() && allocatorEnv_ && !allocatorEnv_->closing)
+            image = allocator_->Call({Napi::Number::New(env, w), Napi::Number::New(env, h)});
         Napi::Value data = image.IsObject() ? image.As<Napi::Object>().Get("data") : env.Undefined();
         if (data.IsTypedArray() && data.As<Napi::TypedArray>().ByteLength() == rgba->size()) {
             auto ta = data.As<Napi::TypedArray>();

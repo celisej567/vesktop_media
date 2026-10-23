@@ -98,6 +98,17 @@ callbacks do not keep the process alive (they are unreferenced), so the fake SFU
 callback is still registered. Callbacks are never invoked synchronously, not even for immediate answers (`Later`),
 because Discord's JS does not expect re-entrancy.
 
+**Teardown.** When a Node environment ends (a window reloads or closes, Vesktop restarts) it closes every thread-safe
+function of it itself, and only then finalizes our objects. Releasing or calling an already closed function is a use of
+a destroyed mutex, which aborted the renderer (exit code 134, "Render frame was disposed" from then on, the window
+frozen) when "restart" was pressed. So a `JsCallback` does nothing (no `Release`, no calls) once its environment is
+closing. "Closing" belongs to **one environment** (`EnvState`, made in `JsEnvInit` by `Init`, which Node runs for every
+environment): a renderer process loads the module in a new environment each time the page is loaded again, and the old
+environment is torn down while the new one already works. A process-wide flag stopped every callback of the new one:
+connections never got their keys ("Connecting to RTC" for ever) and no cameras were listed. The module's statics (the
+engine, the camera list, the video sinks) live as long as the process; what holds a reference into an environment
+(the image allocator of `VideoSinks`) is left alone once that environment closed.
+
 ## Locks
 
 | Mutex | Guards |

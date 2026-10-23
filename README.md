@@ -128,7 +128,7 @@ The module needs Electron's symbols, so Electron's binary runs it. `scripts/test
 It exits with 0 when every packet decrypts and the reflected remote audio is received. The cases `test.sh` runs:
 the noise model extension (`tools/noise-models.js`), speaking and silent calls (with the remote user reported as
 speaking and the ping callback), a DAVE reset, receiving VP8 / H.264 / H.265 clips (needs the `ffmpeg` CLI), a late join
-(key frame on request), sending a camera (several layers, viewers asking for pixels late), Go Live with a camera
+(key frame on request), sending a camera (several layers, viewers asking for pixels late, switching the camera during the call), Go Live with a camera
 (`--golive-camera`), Go Live from a PipeWire node (needs `gst-launch-1.0` with `pipewiresink` and `pw-dump`), and a
 source that goes away mid-stream (`--expect-source-end`: the stream must end, not freeze).
 

@@ -59,7 +59,7 @@ needs no Discord servers, uses fake capture and sends traffic only to 127.0.0.1.
 * `rankRtcRegions`; it dumps `getFilteredStats` to `fake-sfu-stats.json`.
 
 Options: `--seconds`, `--vad <dB>`, `--video VP8|H264|H265`, `--recv-video`, `--late-join`, `--layers 2`,
-`--wants-late`, `--js-inactive`, `--golive-camera`, `--screen <node>`, `--expect-source-end`, `--soundshare <pid>`,
+`--wants-late`, `--js-inactive`, `--switch-camera`, `--golive-camera`, `--screen <node>`, `--expect-source-end`, `--soundshare <pid>`,
 `--video-bitrate <bps>`, `--dave-reset`, `--real-audio`, `--trace`, `--clip-dir <dir>`. Environment of the module for tests:
 `VESKTOP_MEDIA_PIPEWIRE_NODE`, `VESKTOP_MEDIA_ENCODER`, `VESKTOP_MEDIA_LOG_STDERR`, and for the fake microphone
 `VESKTOP_MEDIA_FAKE_MIC=speech` (noise floor and voiced bursts) or `file:<48 kHz mono 16-bit WAV>` (looped).
@@ -74,10 +74,13 @@ Runs against `build/out/vesktop_media.node`:
 |---|---|
 | undefined symbols | a dependency that would only fail when its code path runs ([02](02-build.md)) |
 | noise models (`tools/noise-models.js`) | the extension: RNNoise by default, DeepFilterNet runs and its state is created, Standard is libwebrtc's suppression, nothing runs with the flag off |
+| two environments (`tools/two-environments.js`: a worker next to the main thread) | the callbacks of one environment go on working after the other one was torn down (the page loaded again in the same renderer process) |
+| exit with a connection (`tools/exit-with-connection.js`) | Node's environment teardown finalizing a connection that was not destroyed: it aborted the renderer when Vesktop restarted ([01](01-architecture.md)) |
 | speaking / silent | the send gate: every packet decrypts; silence = 10 Opus silence frames, then nothing; the remote user is reported as speaking; the ping callback gets the server's answer |
 | `--dave-reset` | the DAVE deadlock when a transition turns DAVE off |
 | receive VP8 / H.264 / H.265, H.264 joined mid-stream | decoders; the key frame watchdog |
 | send camera, `--wants-late`, `--js-inactive`, two layers | the encoder idles until viewers ask; layers forced active; simulcast |
+| `--switch-camera` (the fake source has a second camera, "Strobe Video Source 2") | the selected camera changed in a call: the call's own video report names the new camera within 1.5 s |
 | `--golive-camera` | Go Live with a device |
 | Go Live from a PipeWire node (GStreamer test pattern, "Source" size) | screen capture; sink wants 0 must not idle a stream |
 | source closed mid-stream | `global_remove` ends the stream instead of freezing it |

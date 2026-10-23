@@ -7,6 +7,7 @@
 
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -36,7 +37,10 @@ private:
     mutable std::mutex mutex_;
     std::map<std::string, Sink> sinks_;
     std::function<void(const std::string&, bool)> observer_;
-    Napi::FunctionReference allocator_; // JS thread only
+    // JS thread only. The reference belongs to the environment `allocatorEnv_`: when that one is gone it is not touched
+    // (a reference of a closed environment must not be reset or called), only replaced by the next environment's
+    std::unique_ptr<Napi::FunctionReference> allocator_;
+    std::shared_ptr<EnvState> allocatorEnv_;
 };
 
 } // namespace vv

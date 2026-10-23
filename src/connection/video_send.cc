@@ -252,6 +252,14 @@ void Connection::SetVideoBroadcast(bool broadcast)
     });
 }
 
+void Connection::OnVideoDeviceSelected()
+{
+    if (context_ == "stream" || destroyed_) return; // a stream sends its own source, not the selected camera
+    Engine::Get().Worker()->PostTask([this] {
+        if (!destroyed_) UpdateVideoSend();
+    });
+}
+
 void Connection::SetDesktopSource(const json& options)
 {
     auto type = Get<std::string>(options, "type", "");

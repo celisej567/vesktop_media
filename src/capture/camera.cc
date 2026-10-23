@@ -26,6 +26,7 @@ namespace vv {
 namespace {
 
 constexpr const char* kFakeName = "Strobe Video Source";
+constexpr const char* kFakeName2 = "Strobe Video Source 2"; // a second one, to switch between (the tests)
 
 struct DeviceEntry {
     std::string name, guid, path;
@@ -33,23 +34,8 @@ struct DeviceEntry {
     bool hasAutofocus = false;
 };
 
-// The /dev/videoN capture node of a libwebrtc device id (its V4L2 bus_info), "" if none
-std::string DevicePath(const std::string& guid)
-{
-    for (int i = 0; i < 64; i++) {
-        std::string path = "/dev/video" + std::to_string(i);
-        int fd = open(path.c_str(), O_RDWR | O_NONBLOCK);
-        if (fd < 0) continue;
-        v4l2_capability cap{};
-        bool match = ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 &&
-                     ((cap.capabilities & V4L2_CAP_DEVICE_CAPS) ? cap.device_caps : cap.capabilities) & V4L2_CAP_VIDEO_CAPTURE &&
-                     (guid == reinterpret_cast<const char*>(cap.bus_info) || guid == reinterpret_cast<const char*>(cap.card));
-        close(fd);
-        if (match) return path;
-    }
-    return "";
-}
-
+// Whether a node has an autofocus control. Asked only when somebody wants to know (the camera options), never while
+// listing: a control query is a request to the camera itself
 bool HasAutofocus(const std::string& path)
 {
     int fd = path.empty() ? -1 : open(path.c_str(), O_RDWR | O_NONBLOCK);
@@ -61,33 +47,106 @@ bool HasAutofocus(const std::string& path)
     return ok;
 }
 
+// The (width, height, frame rate) modes a node offers, from the driver's own descriptors: VIDIOC_ENUM_FMT,
+// ENUM_FRAMESIZES and ENUM_FRAMEINTERVALS only. They answer from what the driver already knows and send nothing to
+// the camera. (libwebrtc's DeviceInfoV4l2 finds the modes with a VIDIOC_TRY_FMT per format and size, about 200 of
+// them: each one is a UVC probe request, and a camera that another program is streaming, an OBS source, reset on
+// them: it dropped off the USB bus, came back and was probed again while Vesktop was open)
+void EnumerateModes(int fd, std::vector<std::array<int, 3>>& out)
+{
+    auto add = [&](int w, int h, int fps) {
+        std::array<int, 3> m{w, h, std::max(1, fps)};
+        if (w > 0 && h > 0 && std::find(out.begin(), out.end(), m) == out.end()) out.push_back(m);
+    };
+    for (uint32_t fi = 0;; fi++) {
+        v4l2_fmtdesc fmt{};
+        fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        fmt.index = fi;
+        if (ioctl(fd, VIDIOC_ENUM_FMT, &fmt) != 0) break;
+        for (uint32_t si = 0;; si++) {
+            v4l2_frmsizeenum size{};
+            size.pixel_format = fmt.pixelformat;
+            size.index = si;
+            if (ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &size) != 0) break;
+            std::vector<std::pair<int, int>> sizes;
+            if (size.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+                sizes.emplace_back(size.discrete.width, size.discrete.height);
+            } else {
+                // a range (v4l2loopback): the usual sizes inside it, and its largest
+                auto& r = size.stepwise;
+                static const int kUsual[][2] = {{160, 120}, {320, 180}, {320, 240}, {640, 360}, {640, 480},
+                                                {848, 480}, {960, 540}, {1280, 720}, {1600, 900}, {1920, 1080},
+                                                {2560, 1440}, {3840, 2160}};
+                for (auto& u : kUsual)
+                    if (u[0] >= static_cast<int>(r.min_width) && u[0] <= static_cast<int>(r.max_width) &&
+                        u[1] >= static_cast<int>(r.min_height) && u[1] <= static_cast<int>(r.max_height))
+                        sizes.emplace_back(u[0], u[1]);
+                sizes.emplace_back(r.max_width, r.max_height);
+            }
+            for (auto& [w, h] : sizes) {
+                bool any = false;
+                for (uint32_t ii = 0;; ii++) {
+                    v4l2_frmivalenum iv{};
+                    iv.pixel_format = fmt.pixelformat;
+                    iv.width = w;
+                    iv.height = h;
+                    iv.index = ii;
+                    if (ioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, &iv) != 0) break;
+                    if (iv.type == V4L2_FRMIVAL_TYPE_DISCRETE) {
+                        if (iv.discrete.numerator > 0) add(w, h, static_cast<int>(iv.discrete.denominator / iv.discrete.numerator));
+                        any = true;
+                    } else {
+                        // a range of intervals: the fastest, and 30 when it is within
+                        auto& r = iv.stepwise;
+                        if (r.min.numerator > 0) {
+                            int fastest = static_cast<int>(r.min.denominator / r.min.numerator);
+                            add(w, h, fastest);
+                            if (fastest > 30) add(w, h, 30);
+                        }
+                        any = true;
+                        break;
+                    }
+                }
+                if (!any) add(w, h, 30); // no intervals told
+            }
+            if (size.type != V4L2_FRMSIZE_TYPE_DISCRETE) break; // a range has just the one entry
+        }
+    }
+}
+
 std::vector<DeviceEntry> ListDevices(bool fake)
 {
     std::vector<DeviceEntry> out;
     if (fake) {
-        out.push_back({kFakeName, kFakeName, "", {{1920, 1080, 30}, {1280, 720, 60}, {1280, 720, 30}, {640, 360, 30}}, false});
+        for (const char* name : {kFakeName, kFakeName2})
+            out.push_back({name, name, "", {{1920, 1080, 30}, {1280, 720, 60}, {1280, 720, 30}, {640, 360, 30}}, false});
         return out;
     }
-    std::unique_ptr<webrtc::VideoCaptureModule::DeviceInfo> info(webrtc::VideoCaptureFactory::CreateDeviceInfo());
-    if (!info) return out;
-    for (uint32_t i = 0; i < info->NumberOfDevices(); i++) {
-        char name[256] = {}, id[256] = {}, product[256] = {};
-        if (info->GetDeviceName(i, name, sizeof(name), id, sizeof(id), product, sizeof(product)) != 0) continue;
-        int count = info->NumberOfCapabilities(id);
-        if (count <= 0) continue; // metadata nodes
-        DeviceEntry e{name, id};
-        for (int c = 0; c < count; c++) {
-            webrtc::VideoCaptureCapability cap;
-            if (info->GetCapability(id, c, cap) != 0 || cap.width <= 0 || cap.height <= 0) continue;
-            std::array<int, 3> f{cap.width, cap.height, cap.maxFPS};
-            if (std::find(e.formats.begin(), e.formats.end(), f) == e.formats.end()) e.formats.push_back(f);
+    // every /dev/videoN once, with queries only. A capture node is one whose device_caps say video capture (the
+    // nodes next to it are metadata); its guid is the bus_info libwebrtc names it by, its name the card
+    for (int i = 0; i < 64; i++) {
+        std::string path = "/dev/video" + std::to_string(i);
+        int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+        if (fd < 0) continue;
+        v4l2_capability cap{};
+        bool capture = ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 &&
+                       (((cap.capabilities & V4L2_CAP_DEVICE_CAPS) ? cap.device_caps : cap.capabilities) & V4L2_CAP_VIDEO_CAPTURE);
+        if (capture) {
+            std::string guid = reinterpret_cast<const char*>(cap.bus_info);
+            bool seen = false;
+            for (auto& d : out) seen |= d.guid == guid;
+            if (!seen) {
+                DeviceEntry e{reinterpret_cast<const char*>(cap.card), guid, path};
+                EnumerateModes(fd, e.formats);
+                if (!e.formats.empty()) {
+                    std::sort(e.formats.begin(), e.formats.end(), [](auto& a, auto& b) {
+                        return a[0] * a[1] != b[0] * b[1] ? a[0] * a[1] > b[0] * b[1] : a[2] > b[2];
+                    });
+                    out.push_back(std::move(e));
+                }
+            }
         }
-        std::sort(e.formats.begin(), e.formats.end(), [](auto& a, auto& b) {
-            return a[0] * a[1] != b[0] * b[1] ? a[0] * a[1] > b[0] * b[1] : a[2] > b[2];
-        });
-        e.path = DevicePath(id);
-        e.hasAutofocus = HasAutofocus(e.path);
-        out.push_back(std::move(e));
+        close(fd);
     }
     return out;
 }
@@ -196,7 +255,7 @@ std::string Camera::ResolveLocked(const std::string& id) const
     return id; // not enumerated (yet): taken as a guid
 }
 
-json Camera::Capabilities(const std::string& id) const
+json Camera::Capabilities(const std::string& id)
 {
     std::lock_guard lock(mutex_);
     std::string guid = ResolveLocked(id.empty() ? effective_ : id);
@@ -204,6 +263,10 @@ json Camera::Capabilities(const std::string& id) const
     json autofocus = nullptr;
     for (auto& d : devices_) {
         if (d.guid != guid) continue;
+        if (!d.autofocusKnown) {
+            d.hasAutofocus = HasAutofocus(d.path);
+            d.autofocusKnown = true;
+        }
         for (auto& f : d.formats) formats.push_back({{"width", f.width}, {"height", f.height}, {"frameRate", f.fps}});
         if (d.hasAutofocus) autofocus = true;
     }
@@ -233,7 +296,8 @@ void Camera::SetDeviceOptions(const std::string& id, const json& o)
     }
     Post([this, guid] {
         Apply();
-        ApplyAutofocus(guid); // also on a capture that keeps running
+        // on a capture that keeps running; a camera that is not captured by us is left alone (it may be OBS's)
+        if (captures_.count(guid)) ApplyAutofocus(guid);
     });
 }
 
@@ -283,17 +347,24 @@ std::string Camera::EffectiveGuidLocked() const
     return devices_.empty() ? "" : devices_[0].guid;
 }
 
-// The set of device nodes, without opening any of them
+// The set of device nodes, without opening any of them. v4l2loopback nodes (OBS Virtual Camera) are there all the
+// time but only have formats while a producer feeds them, so their state (sysfs `state`, `format`) counts too
 static std::string NodeSignature()
 {
-    std::string sig;
+    std::vector<std::string> nodes;
     std::error_code ec;
     for (auto& e : std::filesystem::directory_iterator("/sys/class/video4linux", ec)) {
-        std::ifstream name(e.path() / "name");
-        std::string n;
-        std::getline(name, n);
-        sig += e.path().filename().string() + ":" + n + "\n";
+        auto read = [&](const char* file) {
+            std::ifstream in(e.path() / file);
+            std::string s;
+            std::getline(in, s);
+            return s;
+        };
+        nodes.push_back(e.path().filename().string() + ":" + read("name") + ":" + read("state") + ":" + read("format"));
     }
+    std::sort(nodes.begin(), nodes.end()); // the directory's order is not promised
+    std::string sig;
+    for (auto& n : nodes) sig += n + "\n";
     return sig;
 }
 
@@ -304,7 +375,7 @@ void Camera::Enumerate()
         std::lock_guard lock(mutex_);
         devices_.clear();
         for (auto& d : list) {
-            Entry e{d.name, d.guid, d.path, {}, d.hasAutofocus};
+            Entry e{d.name, d.guid, d.path, {}, false, false};
             for (auto& f : d.formats) e.formats.push_back({f[0], f[1], f[2]});
             devices_.push_back(std::move(e));
         }
@@ -326,12 +397,30 @@ void Camera::Refresh()
             return;
         }
         auto sig = NodeSignature();
-        if (ready_ && sig == signature_) return;
+        if (ready_ && sig == signature_) {
+            pendingSignature_.clear();
+            return;
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (ready_) {
+            // Enumerating opens every camera. A camera that is plugging in, resetting or being taken by another
+            // program (OBS) makes its nodes come and go every few seconds, and opening it meanwhile (power up,
+            // power down) kept it doing that: wait until the nodes stay as they are for one more poll, and not
+            // more often than every 5 s
+            if (sig != pendingSignature_) {
+                if (pendingSignature_.empty()) VV_LOGI("camera", "the camera nodes changed, waiting for them to settle");
+                pendingSignature_ = sig;
+                return;
+            }
+            if (now - lastEnumerated_ < std::chrono::seconds(5)) return;
+        }
+        pendingSignature_.clear();
         signature_ = sig;
-        auto t0 = std::chrono::steady_clock::now();
+        auto t0 = now;
         Enumerate();
+        lastEnumerated_ = std::chrono::steady_clock::now();
         VV_LOGI("camera", "enumerated cameras in %lld ms",
-                static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count()));
+                static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(lastEnumerated_ - t0).count()));
     });
 }
 
@@ -357,6 +446,9 @@ void Camera::SetDevice(const std::string& id)
         effective_ = EffectiveGuidLocked();
     }
     Post([this] { Apply(); });
+    // the calls that send the selected camera take its frame source from it when their video send is set up:
+    // without being told they went on sending the old camera until something else changed their video
+    if (selectionChanged_) selectionChanged_();
 }
 
 void Camera::Acquire(const void* user, int width, int height, int fps, const std::string& guid)
@@ -437,20 +529,26 @@ void Camera::Apply()
         if (w == wanted.end() || w->second.width != it->second.width || w->second.height != it->second.height ||
             w->second.fps != it->second.fps) {
             Stop(it->first, it->second);
+            lastStopped_[it->first] = std::chrono::steady_clock::now();
             it = captures_.erase(it);
         } else {
             ++it;
         }
     }
+    auto now = std::chrono::steady_clock::now();
     for (auto& [guid, w] : wanted) {
         if (captures_.count(guid)) continue;
+        if (auto busy = busyUntil_.find(guid); busy != busyUntil_.end() && now < busy->second) continue;
         Capture c;
         c.width = w.width;
         c.height = w.height;
         c.fps = w.fps;
         if (Start(guid, c)) {
+            busyUntil_.erase(guid);
             captures_.emplace(guid, std::move(c));
             ApplyAutofocus(guid);
+        } else {
+            busyUntil_[guid] = now + std::chrono::seconds(15);
         }
     }
     capturing_ = !captures_.empty();
@@ -466,7 +564,7 @@ bool Camera::Start(const std::string& guid, Capture& c)
     }
 
     if (fake_) {
-        if (guid != kFakeName) {
+        if (guid != kFakeName && guid != kFakeName2) {
             VV_LOGW("camera", "no camera %s", guid.c_str());
             return false;
         }
@@ -492,19 +590,42 @@ bool Camera::Start(const std::string& guid, Capture& c)
         VV_LOGE("camera", "cannot open %s", guid.c_str());
         return false;
     }
-    std::unique_ptr<webrtc::VideoCaptureModule::DeviceInfo> info(webrtc::VideoCaptureFactory::CreateDeviceInfo());
-    webrtc::VideoCaptureCapability requested, capability;
-    requested.width = width;
-    requested.height = height;
-    requested.maxFPS = fps;
-    requested.videoType = webrtc::VideoType::kI420;
-    if (!info || info->GetBestMatchedCapability(guid.c_str(), requested, capability) < 0) capability = requested;
-    info.reset();
+    // the mode closest to the request, from the modes we listed (libwebrtc's own way of matching would probe the
+    // device again with VIDIOC_TRY_FMT, see EnumerateModes)
+    std::vector<Format> modes;
+    bool justStopped = false;
+    {
+        std::lock_guard lock(mutex_);
+        for (auto& d : devices_)
+            if (d.guid == guid) modes = d.formats;
+        auto stopped = lastStopped_.find(guid);
+        justStopped = stopped != lastStopped_.end() && std::chrono::steady_clock::now() - stopped->second < std::chrono::seconds(3);
+    }
+    webrtc::VideoCaptureCapability capability;
+    capability.width = width;
+    capability.height = height;
+    capability.maxFPS = fps;
+    capability.videoType = webrtc::VideoType::kI420;
+    {
+        // smallest distance in size, then in frame rate (a rate under the request counts double)
+        long best = -1;
+        for (auto& m : modes) {
+            long distance = (std::labs(static_cast<long>(m.width) - width) + std::labs(static_cast<long>(m.height) - height)) * 1000 +
+                            (m.fps >= fps ? m.fps - fps : (fps - m.fps) * 2);
+            if (best >= 0 && distance >= best) continue;
+            best = distance;
+            capability.width = m.width;
+            capability.height = m.height;
+            capability.maxFPS = m.fps;
+        }
+    }
     c.sink = std::make_unique<Sink>(source.get());
     c.module->RegisterCaptureDataCallback(c.sink.get());
-    // a device that was just closed (another mode, another user) can still be busy for a moment
+    // A device that was just closed by us (another mode, another user) can still be busy for a moment. Otherwise a
+    // failure is another program holding the camera (OBS): each request to such a camera is a probe of it, so one
+    // is enough (Apply() does not try again for 15 s)
     bool started = false;
-    for (int attempt = 0; attempt < 3 && !started; attempt++) {
+    for (int attempt = 0; attempt < (justStopped ? 3 : 1) && !started; attempt++) {
         if (attempt) {
             VV_LOGW("camera", "cannot start %s, retrying", guid.c_str());
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -512,7 +633,7 @@ bool Camera::Start(const std::string& guid, Capture& c)
         started = c.module->StartCapture(capability) == 0;
     }
     if (!started) {
-        VV_LOGE("camera", "cannot start %s", guid.c_str());
+        VV_LOGE("camera", "cannot start %s (used by another program, or not ready); not trying again for 15 s", guid.c_str());
         c.module->DeRegisterCaptureDataCallback();
         c.module = nullptr;
         c.sink.reset();
