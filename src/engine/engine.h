@@ -5,6 +5,7 @@
 
 #include <api/environment/environment.h>
 #include <api/scoped_refptr.h>
+#include <common_audio/resampler/include/push_resampler.h>
 
 #include <atomic>
 #include <cstdio>
@@ -37,6 +38,9 @@ struct CaptureFrameInfo {
     float voiceProbability = -1;  // noise canceller (RNNoise) speech probability, -1 = off
 };
 
+// Which implementation answers Discord's noise cancellation flag (the slot of its Krisp). Vesktop extension
+enum class NoiseModel { Standard = 0, RnNoise = 1, DeepFilter = 2 };
+
 struct ProcessingOptions {
     bool echoCancellation = true;
     bool noiseSuppression = true;
@@ -67,6 +71,13 @@ public:
 
     // Engine level options
     void SetTransportOptions(const json& options);
+    // The noise cancellation flag runs RNNoise by default, or DeepFilterNet; Standard is libwebrtc's suppression
+    void SetNoiseModel(NoiseModel model);
+    // A DeepFilterNet state could not be created (any thread): applies the fallback
+    void OnDenoiserFailed();
+    NoiseModel GetNoiseModel() const { return noiseModel_; }
+    // Whether a model really processes audio here
+    static bool NoiseModelSupported(NoiseModel model);
     void SetVadAggressiveness(int mode); // from the connections' vadAutoThreshold
 
     // Devices
@@ -87,6 +98,9 @@ public:
 
     // Called from the APM capture post-processor (audio thread) with the processed mono frame
     void OnProcessedCapture(const float* samples, size_t frames);
+    // The rate the APM processes the capture at (from the capture tap). The analysis, the mic test and voice
+    // messages work on 48 kHz, so lower rates are resampled in OnProcessedCapture
+    void SetCaptureRate(int rateHz) { captureRateHz_ = rateHz; }
 
     struct Callbacks {
         CallbackSlot onVoice;            // (levelDb, flags)
@@ -145,10 +159,14 @@ private:
     std::string recordingDeviceId_, playoutDeviceId_;
     bool recordingDeviceSet_ = false, playoutDeviceSet_ = false;
     json lastInputs_, lastOutputs_, lastVideoInputs_;
+    std::optional<ProcessingOptions> appliedOptions_; // worker thread
+    int appliedDenoiser_ = -1;
+    uint64_t pollCount_ = 0, lastNcFrames_ = 0, lastNcTimeUs_ = 0;
 
     // analysis (audio thread)
     VolumeAnalyzer analyzer_;
     void* vad_ = nullptr;
+    std::atomic<NoiseModel> noiseModel_{NoiseModel::RnNoise};
     std::atomic<int> vadMode_{3};
     int appliedVadMode_ = -1;
     std::atomic<bool> emitVadLevel_{false};
@@ -157,6 +175,9 @@ private:
     int64_t lastInputMs_ = 0;
     int noInputState_ = -1; // -1 unknown, 0 no input, 1 input
     std::atomic<uint64_t> framesCaptured_{0};
+    std::atomic<int> captureRateHz_{48000};
+    std::unique_ptr<webrtc::PushResampler<float>> captureResampler_; // audio thread
+    size_t captureResamplerFrames_ = 0;
     std::atomic<int64_t> firstCaptureMs_{0};
 
     // voice message recording

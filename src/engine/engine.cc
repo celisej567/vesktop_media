@@ -7,6 +7,8 @@
 #include <api/field_trials.h>
 #include <api/make_ref_counted.h>
 #include <api/units/time_delta.h>
+#include <audio/audio_transport_impl.h>
+#include <call/audio_sender.h>
 #include <call/audio_state.h>
 #include <modules/audio_processing/audio_buffer.h>
 #include <rtc_base/logging.h>
@@ -18,6 +20,8 @@
 #include <filesystem>
 
 #include "audio/adm.h"
+#include "audio/deepfilter.h"
+#include "audio/rnnoise.h"
 #include "capture/camera.h"
 #include "video/video_sinks.h"
 #include "common/log.h"
@@ -36,6 +40,9 @@ namespace vv {
 
 namespace {
 
+// How long the mic test is silenced after the processing changed, in 10 ms frames
+constexpr int kSettleFrames = 35;
+
 // Field trials Discord's clients run with
 constexpr char kFieldTrials[] =
     "WebRTC-Audio-NetEqDecisionLogicConfig/reinit_after_expands:100/"
@@ -45,10 +52,21 @@ constexpr char kFieldTrials[] =
     "WebRTC-Bwe-LossBasedBweV2/Enabled:true/"
     "WebRTC-Video-H26xPacketBuffer/Enabled/";
 
+// Takes the audio libwebrtc would encode and drops it. See Engine::UpdateAudioRunning
+class NullAudioSender : public webrtc::AudioSender {
+public:
+    void SendAudioData(std::unique_ptr<webrtc::AudioFrame>) override {}
+};
+
 // Hands the processed capture to the engine (the module's VadObserver::OnPreEncode)
 class CaptureTap : public webrtc::CustomProcessing {
 public:
-    void Initialize(int, int) override {}
+    void Initialize(int sampleRateHz, int channels) override
+    {
+        // the rate libwebrtc captures at: 48 kHz with a sending connection, lower (8 kHz) without one
+        VV_LOGI("engine", "capture processing at %d Hz, %d channel(s)", sampleRateHz, channels);
+        Engine::Get().SetCaptureRate(sampleRateHz);
+    }
     void Process(webrtc::AudioBuffer* audio) override
     {
         if (audio->num_channels() == 0) return;
@@ -125,6 +143,14 @@ void Engine::Initialize(const json& options)
     mixer_ = webrtc::make_ref_counted<Mixer>();
 
     worker_->BlockingCall([&] {
+        // PipeWire's pulse server copies a client's properties to its streams. With node.dont-move the microphone
+        // stream stays on the source Discord picked: tools like Easy Effects move every ordinary recording stream
+        // onto their own source, so the microphone and "Easy Effects Source" would both end up on the latter.
+        // libwebrtc's PulseAudio module cannot set stream properties (or the DONT_MOVE flag, which does not stop that
+        // move), so the client's own are set while it connects, and given back right after
+        const char* oldProp = getenv("PULSE_PROP");
+        std::string oldPropValue = oldProp ? oldProp : "";
+        setenv("PULSE_PROP", (oldPropValue.empty() ? std::string() : oldPropValue + " ") .append("node.dont-move=true").c_str(), 1);
         webrtc::scoped_refptr<webrtc::AudioDeviceModule> platform;
         if (!fakeAudio_) platform = webrtc::CreateAudioDeviceModule(*env_, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
         if (!platform) {
@@ -143,6 +169,8 @@ void Engine::Initialize(const json& options)
         audioState_ = webrtc::AudioState::Create(config);
 
         adm_->Init();
+        if (oldProp) setenv("PULSE_PROP", oldPropValue.c_str(), 1);
+        else unsetenv("PULSE_PROP");
         adm_->RegisterAudioCallback(audioState_->audio_transport());
         adm_->SetPlayoutDevice(0);
         adm_->SetRecordingDevice(0);
@@ -204,6 +232,14 @@ void Engine::UpdateAudioRunning()
     bool needCapture = hasConnections || emitVadLevel_ || loopback || recording;
     bool needPlayout = hasConnections || loopback || mixer_->HasSamples();
 
+    // Without a sender libwebrtc captures at its default 8 kHz (the APM runs at 16 kHz): the signal is band limited
+    // before any processing, and the mic test and voice messages sounded like a phone. A sender that discards
+    // everything makes it capture at 48 kHz. Only while no connection exists: a connection's own send stream sets
+    // the rate (and the senders) itself and would be replaced by this
+    if (needCapture && !hasConnections && audioState_) {
+        static NullAudioSender nullSender;
+        static_cast<webrtc::AudioTransportImpl*>(audioState_->audio_transport())->UpdateAudioSenders({&nullSender}, 48000, 1);
+    }
     if (needCapture && !adm_->Recording()) {
         if (adm_->InitRecording() == 0 && adm_->StartRecording() == 0) VV_LOGI("engine", "capture started");
         else callbacks.admError.Call([](Napi::Env env) {
@@ -240,6 +276,29 @@ void Engine::ApplyProcessing()
         else if (noConnections && recordingOptions_) o = *recordingOptions_;
     }
 
+    // Discord's noise cancellation flag runs the selected model; Standard, or a model that cannot run here (no
+    // library, a DeepFilterNet state that could not be created), is libwebrtc's suppression
+    NoiseModel model = noiseModel_;
+    auto denoiser = CaptureAdm::Denoiser::None;
+    if (o.noiseCancellation) {
+        if (model == NoiseModel::RnNoise) denoiser = CaptureAdm::Denoiser::RnNoise;
+        else if (model == NoiseModel::DeepFilter && NoiseModelSupported(NoiseModel::DeepFilter)) denoiser = CaptureAdm::Denoiser::DeepFilter;
+        else {
+            o.noiseCancellation = false;
+            o.noiseSuppression = true;
+        }
+    }
+
+    // Unchanged options are not applied again: Discord repeats them with every setting, and a configuration set
+    // again can reset the processing stages. The model counts too: RNNoise and DeepFilterNet are the same flags
+    if (appliedOptions_ && *appliedOptions_ == o && appliedDenoiser_ == static_cast<int>(denoiser)) return;
+    bool changed = appliedOptions_.has_value();
+    appliedOptions_ = o;
+    appliedDenoiser_ = static_cast<int>(denoiser);
+    // A stage that was just switched on starts from nothing (noise estimate, echo filter, RNNoise state) and lets
+    // noise through for a moment: the mic test stays silent meanwhile
+    if (changed && mixer_->LoopbackEnabled()) mixer_->DuckLoopback(kSettleFrames);
+
     webrtc::AudioProcessing::Config c;
     c.pipeline.maximum_internal_processing_rate = 48000;
     c.high_pass_filter.enabled = true;
@@ -258,9 +317,36 @@ void Engine::ApplyProcessing()
     c.gain_controller2.adaptive_digital.max_output_noise_level_dbfs = -50;
     apm_->ApplyConfig(c);
 
-    if (o.noiseCancellation && !adm_->NoiseCancellationAvailable())
+    if (denoiser == CaptureAdm::Denoiser::RnNoise && !adm_->NoiseCancellationAvailable())
         callbacks.voiceProcessingError.Call([](Napi::Env env) { return JsCallback::Args{Napi::Number::New(env, 2)}; });
-    adm_->SetNoiseCancellation(o.noiseCancellation);
+    adm_->SetDenoiser(denoiser);
+    static const char* const kDenoisers[] = {"none", "RNNoise", "DeepFilterNet"};
+    VV_LOGI("engine", "processing applied: aec=%d ns=%d agc=%d nc=%d (model %d, denoiser %s)", o.echoCancellation,
+            o.noiseSuppression, o.automaticGainControl, o.noiseCancellation, static_cast<int>(model),
+            kDenoisers[static_cast<int>(denoiser)]);
+}
+
+void Engine::OnDenoiserFailed()
+{
+    // the noise cancellation flag falls back to the standard suppression (NoiseModelSupported is false now)
+    if (initialized_) worker_->PostTask([this] { ApplyProcessing(); });
+}
+
+void Engine::SetNoiseModel(NoiseModel model)
+{
+    if (noiseModel_.exchange(model) == model) return;
+    VV_LOGI("engine", "noise model: %d", static_cast<int>(model));
+    if (initialized_) worker_->PostTask([this] { ApplyProcessing(); });
+}
+
+bool Engine::NoiseModelSupported(NoiseModel model)
+{
+    switch (model) {
+    case NoiseModel::Standard: return true;
+    case NoiseModel::RnNoise: return RnNoise::Available();
+    case NoiseModel::DeepFilter: return DeepFilter::Available() && !DeepFilter::Failed();
+    }
+    return false;
 }
 
 void Engine::SetTransportOptions(const json& options)
@@ -368,6 +454,19 @@ void Engine::SetOutputVolume(float linear)
 
 void Engine::PollDevices()
 {
+    // the noise canceller's cost on the capture thread, every 10 s while one runs
+    if (++pollCount_ % 5 == 0) {
+        uint64_t frames = adm_->NoiseCancellerFrames(), us = adm_->NoiseCancellerTimeUs();
+        if (frames > lastNcFrames_)
+            VV_LOGI("engine", "noise canceller: %llu us per 10 ms frame on average", static_cast<unsigned long long>((us - lastNcTimeUs_) / (frames - lastNcFrames_)));
+        lastNcFrames_ = frames;
+        lastNcTimeUs_ = us;
+    }
+    if (mixer_->LoopbackEnabled()) {
+        auto s = mixer_->TakeLoopbackStats();
+        VV_LOGI("engine", "mic test: queue %zu to %zu samples, %llu underruns, %llu dropped in the last 2 s", s.minDepth, s.maxDepth,
+                static_cast<unsigned long long>(s.underruns), static_cast<unsigned long long>(s.dropped));
+    }
     auto inputs = DeviceList(true);
     auto outputs = DeviceList(false);
     // cameras: the cached list (never touches a device), refreshed in the background only when idle and
@@ -414,6 +513,20 @@ void Engine::OnProcessedCapture(const float* samples, size_t frames)
     int64_t now = NowMs();
     if (!firstCaptureMs_) firstCaptureMs_ = now;
     framesCaptured_++;
+
+    // Without a sending connection (the mic test, a voice message) libwebrtc captures at a lower rate than a call's
+    // 48 kHz (16 kHz). Everything below is 48 kHz: the mixer plays the loopback at that rate and the WAV says so
+    float resampled[480];
+    int rate = captureRateHz_;
+    if (rate != 48000 && rate > 0 && frames * 100 == static_cast<size_t>(rate)) {
+        if (!captureResampler_ || captureResamplerFrames_ != frames) {
+            captureResampler_ = std::make_unique<webrtc::PushResampler<float>>(frames, 480, 1);
+            captureResamplerFrames_ = frames;
+        }
+        captureResampler_->Resample(webrtc::MonoView<const float>(samples, frames), webrtc::MonoView<float>(resampled, 480));
+        samples = resampled;
+        frames = 480;
+    }
 
     float norm[960];
     int16_t pcm[960];

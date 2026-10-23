@@ -7,7 +7,9 @@
 #include <cmath>
 #include <cstring>
 
+#include "audio/mixer.h"
 #include "common/log.h"
+#include "engine/engine.h"
 #include "common/util.h"
 
 namespace vv {
@@ -45,24 +47,41 @@ void CaptureAdm::Process(int16_t* samples, size_t frames, size_t channels, uint3
         for (size_t i = 0; i < frames * channels; i++)
             samples[i] = static_cast<int16_t>(std::clamp(samples[i] * gain, -32768.0f, 32767.0f));
 
-    if (!noiseCancellation_ || rate != 48000 || frames != 480 || channels > 2) {
+    Denoiser denoiser = denoiser_;
+    if (resetDenoiser_.exchange(false)) {
+        for (auto& r : rnnoise_) r.reset();
+        // a DeepFilterNet state is freed (and its creation waited for) away from the audio thread
+        for (auto& d : deepFilter_)
+            if (d) std::thread([old = std::move(d)] {}).detach();
+    }
+    if (denoiser == Denoiser::None || rate != 48000 || frames != 480 || channels > 2) {
         voiceProbability_ = -1;
         return;
     }
     int64_t t0 = NowUs();
     float prob = 0;
+    bool processed = false;
     for (size_t c = 0; c < channels; c++) {
-        if (!rnnoise_[c]) rnnoise_[c] = std::make_unique<RnNoise>();
-        if (!*rnnoise_[c]) {
-            voiceProbability_ = -1;
-            return;
-        }
         float buf[480];
         for (size_t i = 0; i < frames; i++) buf[i] = samples[i * channels + c];
-        prob = std::max(prob, rnnoise_[c]->Process(buf));
+        if (denoiser == Denoiser::RnNoise) {
+            if (!rnnoise_[c]) rnnoise_[c] = std::make_unique<RnNoise>();
+            if (!*rnnoise_[c]) {
+                voiceProbability_ = -1;
+                return;
+            }
+            prob = std::max(prob, rnnoise_[c]->Process(buf));
+        } else {
+            // when it cannot be created the engine falls back to the standard suppression
+            if (!deepFilter_[c]) deepFilter_[c] = std::make_unique<DeepFilter>([] { Engine::Get().OnDenoiserFailed(); });
+            if (!deepFilter_[c]->Process(buf)) continue; // not ready yet: unchanged
+            prob = -1; // no speech probability: voice activity falls back to the WebRTC VAD
+        }
+        processed = true;
         for (size_t i = 0; i < frames; i++) samples[i * channels + c] = static_cast<int16_t>(std::clamp(buf[i], -32768.0f, 32767.0f));
     }
-    voiceProbability_ = prob;
+    voiceProbability_ = denoiser == Denoiser::RnNoise ? prob : -1;
+    if (!processed) return;
     ncFrames_++;
     ncTimeUs_ += NowUs() - t0;
 }
@@ -100,7 +119,11 @@ int32_t CaptureAdm::NeedMorePlayData(size_t nSamples, size_t bytesPerSample, siz
         samplesOut = nSamples;
         return 0;
     }
-    return downstream_->NeedMorePlayData(nSamples, bytesPerSample, channels, rate, samples, samplesOut, elapsedMs, ntpMs);
+    int32_t rc = downstream_->NeedMorePlayData(nSamples, bytesPerSample, channels, rate, samples, samplesOut, elapsedMs, ntpMs);
+    // the mic test's own voice goes to the speakers but not to the echo canceller's reference
+    if (rc == 0 && bytesPerSample == 2 * channels && samplesOut >= nSamples)
+        Engine::Get().PlayoutMixer().MixLoopbackInto(static_cast<int16_t*>(samples), nSamples, channels, rate);
+    return rc;
 }
 
 void CaptureAdm::PullRenderData(int bits, int rate, size_t channels, size_t frames, void* data, int64_t* elapsedMs,
@@ -226,10 +249,27 @@ private:
             if (!transport_) continue;
             if (recording_) {
                 // A 440 Hz tone with a 2 Hz tremolo, about -20 dBFS: always "speech" for level based VAD
-                for (int i = 0; i < 480; i++, n++) {
-                    double t = static_cast<double>(n) / 48000.0;
-                    double env = 0.6 + 0.4 * std::sin(2 * M_PI * 2 * t);
-                    mic[i] = static_cast<int16_t>(3200 * env * std::sin(2 * M_PI * 440 * t));
+                if (!fileSamples_.empty()) {
+                    // VESKTOP_MEDIA_FAKE_MIC=file:<path>: a 48 kHz mono 16-bit WAV, looped
+                    for (int i = 0; i < 480; i++, n++) mic[i] = fileSamples_[n % fileSamples_.size()];
+                } else if (speechLike_) {
+                    // VESKTOP_MEDIA_FAKE_MIC=speech: a noise floor (about -55 dBFS) with voiced bursts (150 Hz and its
+                    // harmonics, 300 ms on, 200 ms off, about -20 dBFS): something the noise suppressors treat as a voice
+                    for (int i = 0; i < 480; i++, n++) {
+                        double t = static_cast<double>(n) / 48000.0;
+                        double phase = std::fmod(t, 0.5);
+                        double env = phase < 0.3 ? std::sin(M_PI * phase / 0.3) : 0.0;
+                        double voice = 0;
+                        for (int k = 1; k <= 20; k++) voice += std::sin(2 * M_PI * 150 * k * t) / k;
+                        noise_ = 0.97 * noise_ + 0.03 * ((rand() / static_cast<double>(RAND_MAX)) - 0.5);
+                        mic[i] = static_cast<int16_t>(std::clamp(2500 * env * voice + 9000 * noise_, -32768.0, 32767.0));
+                    }
+                } else {
+                    for (int i = 0; i < 480; i++, n++) {
+                        double t = static_cast<double>(n) / 48000.0;
+                        double env = 0.6 + 0.4 * std::sin(2 * M_PI * 2 * t);
+                        mic[i] = static_cast<int16_t>(3200 * env * std::sin(2 * M_PI * 440 * t));
+                    }
                 }
                 uint32_t newLevel = 0;
                 transport_->RecordedDataIsAvailable(mic, 480, 2, 1, 48000, 20, 0, 0, false, newLevel);
@@ -242,6 +282,21 @@ private:
         }
     }
 
+    const bool speechLike_ = getenv("VESKTOP_MEDIA_FAKE_MIC") && std::string(getenv("VESKTOP_MEDIA_FAKE_MIC")) == "speech";
+    const std::vector<int16_t> fileSamples_ = [] {
+        std::vector<int16_t> samples;
+        const char* env = getenv("VESKTOP_MEDIA_FAKE_MIC");
+        if (!env || strncmp(env, "file:", 5) != 0) return samples;
+        if (FILE* f = fopen(env + 5, "rb")) {
+            fseek(f, 44, SEEK_SET); // a plain WAV header
+            int16_t buf[4096];
+            size_t n;
+            while ((n = fread(buf, 2, 4096, f)) > 0) samples.insert(samples.end(), buf, buf + n);
+            fclose(f);
+        }
+        return samples;
+    }();
+    double noise_ = 0;
     std::mutex mutex_;
     webrtc::AudioTransport* transport_ = nullptr;
     std::atomic<bool> running_{false}, playing_{false}, recording_{false}, playoutInit_{false}, recordingInit_{false};

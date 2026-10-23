@@ -10,6 +10,7 @@ namespace vv {
 namespace {
 constexpr size_t kFrames = 480; // 10 ms @ 48 kHz
 constexpr size_t kMaxLoopbackQueue = 48000 / 5; // 200 ms
+constexpr size_t kLoopbackPrime = kFrames * 3;   // 30 ms
 } // namespace
 
 void Mixer::SetSourceGain(uint32_t ssrc, SourceGain gain)
@@ -33,8 +34,31 @@ void Mixer::SetOutputGain(float gain)
 void Mixer::SetLoopback(bool enabled)
 {
     std::lock_guard lock(mutex_);
+    // Discord sends the loopback options again with every audio setting, often several times in a row: only
+    // turning it on starts a fresh queue, repeating it must not drop what is queued (an audible glitch)
+    if (enabled == loopback_) return;
     loopback_ = enabled;
     loopbackQueue_.clear();
+    loopbackPrimed_ = false;
+    duckFrames_ = 0;
+    duckGain_ = 1;
+    stats_ = {};
+    statsFresh_ = true;
+}
+
+void Mixer::DuckLoopback(int frames)
+{
+    std::lock_guard lock(mutex_);
+    duckFrames_ = std::max(duckFrames_, frames);
+}
+
+Mixer::LoopbackStats Mixer::TakeLoopbackStats()
+{
+    std::lock_guard lock(mutex_);
+    auto s = stats_;
+    stats_ = {};
+    statsFresh_ = true;
+    return s;
 }
 
 bool Mixer::LoopbackEnabled() const
@@ -48,7 +72,11 @@ void Mixer::PushLoopback(const float* samples, size_t count)
     std::lock_guard lock(mutex_);
     if (!loopback_) return;
     loopbackQueue_.insert(loopbackQueue_.end(), samples, samples + count);
-    while (loopbackQueue_.size() > kMaxLoopbackQueue) loopbackQueue_.pop_front();
+    while (loopbackQueue_.size() > kMaxLoopbackQueue) {
+        loopbackQueue_.pop_front();
+        stats_.dropped++;
+    }
+    stats_.maxDepth = std::max(stats_.maxDepth, loopbackQueue_.size());
 }
 
 void Mixer::StartSamples(const std::string& key, int sampleRate, float volume, std::vector<std::vector<float>> channels,
@@ -133,6 +161,60 @@ void Mixer::RemoveSource(Source* source)
     sources_.erase(std::remove(sources_.begin(), sources_.end(), source), sources_.end());
 }
 
+// The mic test's loopback is added to the playout after libwebrtc took its echo reference (CaptureAdm). In the
+// reference the echo canceller took the test's own voice for echo of the speaker and suppressed the microphone while
+// it was playing, which pulsed
+// The mic test's loopback is added to the playout after libwebrtc took its echo reference (CaptureAdm::NeedMorePlayData).
+// In the reference the echo canceller took the test's own voice for echo from the speaker and suppressed the
+// microphone while it played, which pulsed
+void Mixer::MixLoopbackInto(int16_t* data, size_t frames, size_t channels, uint32_t rate)
+{
+    if (channels == 0 || frames * 100 != rate) return; // 10 ms of the playout device's rate
+    std::lock_guard lock(mutex_);
+    if (!loopback_) return;
+    float mix[kFrames] = {};
+    bool any = false;
+    // start once 30 ms are queued, so the capture's bursts do not leave gaps; buffer again after running dry
+    if (!loopbackPrimed_ && loopbackQueue_.size() >= kLoopbackPrime) loopbackPrimed_ = true;
+    if (loopbackPrimed_ && loopbackQueue_.size() < kFrames) {
+        loopbackPrimed_ = false;
+        stats_.underruns++;
+    }
+    if (statsFresh_) stats_.minDepth = loopbackQueue_.size(), statsFresh_ = false;
+    else stats_.minDepth = std::min(stats_.minDepth, loopbackQueue_.size());
+    if (loopbackPrimed_) {
+        float target = duckFrames_ > 0 ? 0.f : 1.f;
+        if (duckFrames_ > 0) duckFrames_--;
+        for (size_t i = 0; i < kFrames; i++) {
+            float s = loopbackQueue_.front();
+            loopbackQueue_.pop_front();
+            float g = duckGain_ + (target - duckGain_) * (i + 1) / kFrames; // a 10 ms ramp to the target
+            mix[i] = s * g;
+            any = true;
+        }
+        duckGain_ = target;
+    }
+
+    if (!any) return;
+    // the device may play at another rate than the 48 kHz of the mixer
+    float resampled[kFrames * 4];
+    const float* in = mix;
+    if (frames != kFrames) {
+        if (frames > std::size(resampled)) return;
+        if (!loopbackResampler_ || loopbackResamplerFrames_ != frames) {
+            loopbackResampler_ = std::make_unique<webrtc::PushResampler<float>>(kFrames, frames, 1);
+            loopbackResamplerFrames_ = frames;
+        }
+        loopbackResampler_->Resample(webrtc::MonoView<const float>(mix, kFrames), webrtc::MonoView<float>(resampled, frames));
+        in = resampled;
+    }
+    for (size_t i = 0; i < frames; i++) {
+        float v = in[i] * outputGain_;
+        for (size_t c = 0; c < channels; c++)
+            data[i * channels + c] = static_cast<int16_t>(std::clamp(data[i * channels + c] + v, -32768.0f, 32767.0f));
+    }
+}
+
 void Mixer::Mix(size_t channels, webrtc::AudioFrame* frame)
 {
     float mix[kFrames * 2] = {};
@@ -153,15 +235,6 @@ void Mixer::Mix(size_t channels, webrtc::AudioFrame* frame)
                 float r = ch > 1 ? d[i * ch + 1] : l;
                 mix[2 * i] += l * g.left;
                 mix[2 * i + 1] += r * g.right;
-            }
-        }
-
-        if (loopback_ && loopbackQueue_.size() >= kFrames) {
-            for (size_t i = 0; i < kFrames; i++) {
-                float s = loopbackQueue_.front();
-                loopbackQueue_.pop_front();
-                mix[2 * i] += s;
-                mix[2 * i + 1] += s;
             }
         }
 

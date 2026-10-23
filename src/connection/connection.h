@@ -46,7 +46,7 @@ class PipeWireCapturer;
 class VideoFrameEncryptor;
 
 // Speaking flags (gateway SPEAKING)
-enum SpeakingFlags { kSpeakingNone = 0, kSpeakingVoice = 1, kSpeakingSoundshare = 2, kSpeakingPriority = 4 };
+enum SpeakingFlags { kSpeakingNone = 0, kSpeakingVoice = 1, kSpeakingSoundshare = 2, kSpeakingPriority = 4, kSpeakingHidden = 8 };
 
 class Connection {
 public:
@@ -137,8 +137,10 @@ private:
         float volume = 1;
         bool mute = false;
         float panLeft = 1, panRight = 1;
-        int speakingFlags = 0;
+        int speakingFlags = 0;  // from the gateway (setRemoteUserSpeakingStatus)
         bool canHavePriority = false;
+        int64_t lastAudibleMs = -1'000'000; // worker: the last time their decoded audio was above the threshold
+        int reportedFlags = 0;              // worker: what the speaking callback last said for them
         webrtc::AudioReceiveStreamInterface* stream = nullptr;
         webrtc::scoped_refptr<FrameDecryptor> decryptor;
         bool videoDisabled = false;
@@ -237,6 +239,12 @@ private:
     webrtc::VideoSendStream* videoSendStream_ = nullptr;
     webrtc::RepeatingTaskHandle videoStatsTask_; // logs the send stream's state every 5 s
     webrtc::RepeatingTaskHandle audioStatsTask_; // logs audio packets sent / received every 10 s (diagnostics)
+    webrtc::RepeatingTaskHandle remoteSpeakingTask_; // reports who is speaking, from the received audio
+    void UpdateRemoteSpeaking(); // worker
+    // keepalive diagnostics (network thread)
+    std::atomic<uint64_t> pingsSent_{0}, pingsEchoed_{0}, pingsTimedOut_{0}, shortPacketsIn_{0};
+    uint64_t lastPingsSent_ = 0, lastPingsEchoed_ = 0, lastPingsTimedOut_ = 0, lastShortPacketsIn_ = 0;
+    int shortPacketsLogged_ = 0;
     std::map<std::string, uint32_t> lastAudioReceived_;
     uint32_t lastAudioSent_ = 0;
     std::atomic<uint64_t> rtpIn_{0}, rtcpIn_{0}; // network thread: RTP / RTCP packets that arrived

@@ -73,6 +73,8 @@ fi
 
 # our own FFmpeg (H.264 / H.265 decoders, x264 / x265 / NVENC encoders), shipped next to the module
 sh "$ROOT/scripts/build-ffmpeg.sh"
+# RNNoise and DeepFilterNet, shipped next to the module too
+sh "$ROOT/scripts/build-denoise.sh"
 
 echo "== building vesktop_media"
 fresh "$BUILD/main" .
@@ -86,5 +88,8 @@ done
 FFLIB=$TP/ffmpeg/prefix/lib
 for f in libvesktop_ffmpeg.so; do
     cp -L "$FFLIB/$f" "$BUILD/out/.$f.tmp" && mv -f "$BUILD/out/.$f.tmp" "$BUILD/out/$f"
+done
+for f in libvesktop_rnnoise.so libvesktop_deepfilter.so; do
+    cp -L "$TP/denoise/prefix/lib/$f" "$BUILD/out/.$f.tmp" && mv -f "$BUILD/out/.$f.tmp" "$BUILD/out/$f"
 done
 echo "== done: $BUILD/out"

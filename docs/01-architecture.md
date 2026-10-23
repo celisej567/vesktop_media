@@ -14,7 +14,7 @@ src/addon.cc  ── N-API export table: argument conversion (napi → json), st
         ├── src/engine/      Engine: one per process (worker thread, audio device, processing, mixer)
         ├── src/connection/  Connection: one per VoiceConnection (UDP, webrtc::Call, streams, DAVE)
         ├── src/capture/     portal picker, PipeWire screen capture, cameras
-        ├── src/audio/       ADM wrapper, mixer, level meter, RNNoise, soundshare
+        ├── src/audio/       ADM wrapper, mixer, level meter, RNNoise, DeepFilterNet, soundshare
         ├── src/video/       decoders, FFmpeg encoders, frame sources, frame sinks to JS
         ├── src/transport/   UDP socket, transport encryption, region latency test
         ├── src/dave/        DAVE session (libdave)
@@ -58,7 +58,7 @@ throw.
 
 | Object | Lifetime | Owns |
 |---|---|---|
-| `Engine` (`engine/engine.h`) | process, never destroyed (libwebrtc threads can outlive static destructors) | the WebRTC `Environment` and field trials, the "Voice" worker thread, `CaptureAdm`, `AudioProcessing`, the playout `Mixer`, the shared `AudioState`, the WebRTC VAD, the voice message file |
+| `Engine` (`engine/engine.h`) | process, never destroyed (libwebrtc threads can outlive static destructors) | the WebRTC `Environment` and field trials, the "Voice" worker thread, `CaptureAdm`, `AudioProcessing`, the playout `Mixer`, the shared `AudioState`, the WebRTC VAD, the noise model, the voice message file |
 | `Connection` (`connection/connection.h`) | from `new VoiceConnection` to `destroy()` | the UDP socket and the network thread, `webrtc::Call`, the audio send stream, one audio receive stream and N video receive streams per remote user, the video send stream, `DaveSession`, the soundshare capture, the desktop capture |
 | `Camera` (`capture/camera.h`) | process | the camera thread, one `FrameSource` per device (kept for the process lifetime), the running captures |
 | `ScreenCastPortal` (`capture/portal.h`) | process | the session D-Bus connection, the one portal session, the capture started right after a pick (until a connection takes it) |
@@ -81,9 +81,10 @@ A connection's `context` comes from its options:
 | Thread | Created by | Runs |
 |---|---|---|
 | JS thread (the renderer's main thread) | Electron | every exported function; every callback into JS (through `Napi::ThreadSafeFunction`, never directly) |
-| "Voice" worker (`webrtc::Thread`) | `Engine::Initialize` | every `webrtc::Call` (created with a joined worker / network queue), stream creation and reconfiguration, `UpdateVideoSend`, device polling every 2 s, the stats tasks |
+| "Voice" worker (`webrtc::Thread`) | `Engine::Initialize` | every `webrtc::Call` (created with a joined worker / network queue), stream creation and reconfiguration, `UpdateVideoSend`, device polling every 2 s, the stats tasks, the remote speaking task (every 50 ms, `UpdateRemoteSpeaking`) |
 | network thread, one per connection | `Connection` constructor | `NetworkLoop`: polls the socket every 10 ms, IP discovery, keepalive pings, transport decryption; posts RTP / RTCP to the worker |
-| audio device threads | libwebrtc's PulseAudio module | capture → `CaptureAdm` (gain, RNNoise) → APM → `CaptureTap` → `Engine::OnProcessedCapture` → every connection's send gate; playout → `Mixer::Mix` |
+| audio device threads | libwebrtc's PulseAudio module | capture → `CaptureAdm` (gain, RNNoise or DeepFilterNet) → APM → `CaptureTap` → `Engine::OnProcessedCapture` → every connection's send gate; playout → `Mixer::Mix`, then the mic test's loopback is added in `CaptureAdm::NeedMorePlayData` |
+| DeepFilterNet creator, one per microphone channel | `DeepFilter` constructor | loading the model (about 0.1 s) without holding the audio thread; freeing an old state also happens on a short-lived thread |
 | libwebrtc's own task queues | `webrtc::Call` | encoding, pacing, RTCP |
 | camera thread | `Camera` | everything that touches a V4L2 device (enumeration, start, stop, autofocus) |
 | portal thread, one per picker | `ScreenCastPortal::Present` | the D-Bus requests of a pick, with its own `GMainContext` |
@@ -110,6 +111,7 @@ because Discord's JS does not expect re-entrancy.
 | `Connection::addressMutex_` | the SFU address (`setUdpEndpoint` on the JS thread, sending on others) |
 | `TransportCrypto::mutex_` | mode and key |
 | `DaveSession::mutex_` | the MLS session, encryptor, decryptors |
+| `Mixer::mutex_` | sources and their gains, the mic test queue, local samples |
 | `VideoSinks::mutex_` | the sink table and their "ready" flags |
 | `Camera::mutex_` | devices, users, options, frame sources (the camera thread's own state needs no lock) |
 | `ScreenCastPortal::mutex_` / `busMutex_` | the session, the pick, the pre-started capture / the bus connection |

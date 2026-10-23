@@ -1,8 +1,10 @@
 # 2. Build and toolchain
 
-`sh scripts/build.sh` builds everything into `build/out/` (`index.js`, `vesktop_media.node`,
-`libvesktop_ffmpeg.so`). Vesktop's `pnpm build` runs it (`buildVesktopMedia` in `scripts/build/build.mts`) and copies
-the three files to `dist/vesktop_media`.
+`sh scripts/build.sh` builds everything into `build/out/` (`index.js`, `vesktop_media.node`, `libvesktop_ffmpeg.so`,
+`libvesktop_rnnoise.so`, `libvesktop_deepfilter.so`). Vesktop's `pnpm build` runs it (`buildVesktopMedia` in
+`scripts/build/build.mts`) and copies the five files to `dist/vesktop_media`. `build.sh` first builds the dependencies
+(libdave, mlspp, `build-ffmpeg.sh`, `build-denoise.sh`) into `third_party/` and `build/`; a library that is already
+built is not built again.
 
 ## libwebrtc and Chromium's libc++
 
@@ -39,7 +41,7 @@ and the toolchain points `OPENSSL_*` at `libwebrtc.a`.
 libwebrtc references. Anything else would fail only when that code path runs.
 
 Optional libraries are **not linked** but opened with `dlopen` when needed (`common/platform.h`, `OpenLibrary`):
-libsodium (legacy encryption modes), librnnoise, libpulse, GIO / GLib, PipeWire, FFmpeg. Each is looked up next to
+libsodium (legacy encryption modes), libpulse, GIO / GLib, PipeWire, FFmpeg. Each is looked up next to
 `vesktop_media.node` first, then on the system search path. A system without PulseAudio or PipeWire still loads the
 module; only the feature that needs it is missing. GIO and PipeWire headers come from the system (`pkg-config`) for
 the declarations only.
@@ -78,11 +80,34 @@ FFmpeg is used through `dlsym` and a few known structure offsets (the leading fi
 `pict_type` moved in libavutil 60), not through its headers: the encoder accepts libavutil 56 to 61 and refuses
 anything else rather than guess a layout.
 
+## RNNoise and DeepFilterNet
+
+`scripts/build-denoise.sh` downloads the sources into `third_party/denoise` (RNNoise v0.2 with its model, DeepFilterNet
+v0.5.6) and builds two libraries that ship next to the module:
+
+* `libvesktop_rnnoise.so`: RNNoise as a static library, linked into one shared library with `-Bsymbolic` and a version
+  script that exports only `rnnoise_*` (as FFmpeg is, so its internal symbols cannot clash with the host's);
+* `libvesktop_deepfilter.so`: DeepFilterNet's C API (`df_*`) as a Rust `cdylib`, without its audio file formats and
+  dataset code (`--no-default-features --features capi`). The crate builds only an rlib by itself (its C API is meant
+  for cargo-c), so the script asks for the cdylib. The locked `time` crate does not compile with Rust 1.80 or newer
+  and is raised to 0.3.36. Source and cargo paths are remapped out of the library.
+
+DeepFilterNet's C API is patched (`scripts/patches/deepfilter-capi.patch`, applied by the script, the library is built
+again when the patch changes): `df_create(NULL)` loads the model built into the library, so no model file ships next to
+it, `df_set_thresholds` sets the local SNR thresholds of its stages (see [03](03-audio.md)), and a Rust panic inside
+`df_create`, `df_process_frame` or `df_free` returns NULL / NaN instead of unwinding into the C++ host, which would
+abort Vesktop. The script needs `cargo` for DeepFilterNet and autoconf, automake and libtool for RNNoise (its
+`autogen.sh`).
+
+They are opened with `OpenLocalLibrary`, which looks only in the directory of `vesktop_media.node` (no system search
+path, so a system `librnnoise` is never used), without `RTLD_DEEPBIND`. The log says which file was loaded.
+
 ## Relocatable builds
 
 The scripts do not depend on where the project lives or on the user:
 
-* every path is relative to the package directory;
+* every path is relative to the package directory (also in `build-denoise.sh`; the Rust library is built with
+  `--remap-path-prefix` for the sources, cargo and the toolchain);
 * a CMake build directory remembers the absolute source path; `fresh()` in `build.sh` (and the same checks in
   `build-ffmpeg.sh`) starts a build directory over when it was configured elsewhere;
 * `-ffile-prefix-map=<root>/=` (toolchain) removes the build machine's paths from `__FILE__` in log messages;
@@ -106,4 +131,7 @@ glibc (Ubuntu 22.04, glibc 2.35). This has not been set up yet.
 
 Vesktop's `package.json` lists `dist/vesktop_media` in `asarUnpack`: native files cannot be loaded from inside the
 asar archive. `getVesktopMediaPath()` in `src/main/discordVoice.ts` rewrites `app.asar` to `app.asar.unpacked`.
-`VESKTOP_SKIP_MEDIA=1` builds Vesktop without the module; without the build tools Vesktop is built without it too.
+`VESKTOP_SKIP_MEDIA=1` builds Vesktop without the module; without the build tools Vesktop is built without it too, and
+so is a checkout where the git submodule `packages/vesktop_media` was not fetched (`git submodule update --init`).
+`electron-builder` needs a `publish` setting even with updates disabled: Vesktop's `package.json` has a placeholder
+(`generic`, the repository's releases URL), so `pnpm package --linux pacman` (or `deb`, `rpm`, `tar.gz`) finishes.

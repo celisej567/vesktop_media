@@ -1,0 +1,90 @@
+diff --git a/libDF/src/capi.rs b/libDF/src/capi.rs
+index 6b79fd1..9bc7d58 100644
+--- a/libDF/src/capi.rs
++++ b/libDF/src/capi.rs
+@@ -1,5 +1,6 @@
+ use std::boxed::Box;
+ use std::ffi::{c_char, c_float, c_uint, CStr};
++use std::panic::{catch_unwind, AssertUnwindSafe};
+ use std::path::PathBuf;
+ 
+ use ndarray::prelude::*;
+@@ -11,8 +12,12 @@ pub struct DFState(crate::tract::DfTract);
+ impl DFState {
+     fn new(model_path: &str, channels: usize, atten_lim: f32) -> Self {
+         let r_params = RuntimeParams::default_with_ch(channels).with_atten_lim(atten_lim);
+-        let df_params =
+-            DfParams::new(PathBuf::from(model_path)).expect("Could not load model from path");
++        // vesktop_media: an empty path loads the model built into the library (feature default-model)
++        let df_params = if model_path.is_empty() {
++            DfParams::default()
++        } else {
++            DfParams::new(PathBuf::from(model_path)).expect("Could not load model from path")
++        };
+         let m =
+             DfTract::new(df_params, &r_params).expect("Could not initialize DeepFilter runtime.");
+         DFState(m)
+@@ -36,10 +41,12 @@ pub unsafe extern "C" fn df_create(
+     // channels: usize,
+     atten_lim: f32,
+ ) -> *mut DFState {
+-    let c_str = CStr::from_ptr(path);
+-    let path = c_str.to_str().unwrap();
+-    let df = DFState::new(path, 1, atten_lim);
+-    Box::into_raw(df.boxed())
++    // vesktop_media: NULL = the built-in model; a panic (the host is a C++ process) returns NULL instead of unwinding
++    let path = if path.is_null() { String::new() } else { CStr::from_ptr(path).to_string_lossy().into_owned() };
++    match catch_unwind(AssertUnwindSafe(|| DFState::new(&path, 1, atten_lim))) {
++        Ok(df) => Box::into_raw(df.boxed()),
++        Err(_) => std::ptr::null_mut(),
++    }
+ }
+ 
+ /// Get DeepFilterNet frame size in samples.
+@@ -59,6 +66,18 @@ pub unsafe extern "C" fn df_set_atten_lim(st: *mut DFState, lim_db: f32) {
+     state.0.set_atten_lim(lim_db)
+ }
+ 
++/// vesktop_media: set the local SNR thresholds of the processing stages (dB). Below `min_db` the frame is treated as
++/// noise only (zero mask); above `max_db_erb` no processing runs at all; above `max_db_df` the deep filter stage is
++/// skipped. With a clean microphone the local SNR hovers around the upper thresholds and the stages switch on and
++/// off from frame to frame, which is audible as a pulsing voice.
++#[no_mangle]
++pub unsafe extern "C" fn df_set_thresholds(st: *mut DFState, min_db: f32, max_db_erb: f32, max_db_df: f32) {
++    let Some(state) = st.as_mut() else { return };
++    state.0.min_db_thresh = min_db;
++    state.0.max_db_erb_thresh = max_db_erb;
++    state.0.max_db_df_thresh = max_db_df;
++}
++
+ /// Set DeepFilterNet post filter beta. A beta of 0 disables the post filter.
+ ///
+ /// Args:
+@@ -84,11 +103,14 @@ pub unsafe extern "C" fn df_process_frame(
+     input: *mut c_float,
+     output: *mut c_float,
+ ) -> c_float {
+-    let state = st.as_mut().expect("Invalid pointer");
++    // vesktop_media: NaN (output untouched) instead of a panic unwinding into the host
++    let Some(state) = st.as_mut() else { return c_float::NAN };
+     let input = ArrayView2::from_shape_ptr((1, state.0.hop_size), input);
+     let output = ArrayViewMut2::from_shape_ptr((1, state.0.hop_size), output);
+-
+-    state.0.process(input, output).expect("Failed to process DF frame")
++    catch_unwind(AssertUnwindSafe(|| state.0.process(input, output)))
++        .ok()
++        .and_then(|r| r.ok())
++        .unwrap_or(c_float::NAN)
+ }
+ 
+ /// Processes a filter bank sample and return raw gains and DF coefs.
+@@ -170,5 +192,8 @@ pub unsafe extern "C" fn df_gain_size(st: *const DFState) -> DynArray {
+ /// Free a DeepFilterNet Model
+ #[no_mangle]
+ pub unsafe extern "C" fn df_free(model: *mut DFState) {
+-    let _ = Box::from_raw(model);
++    if model.is_null() {
++        return;
++    }
++    let _ = catch_unwind(AssertUnwindSafe(|| drop(Box::from_raw(model))));
+ }

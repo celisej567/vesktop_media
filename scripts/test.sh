@@ -6,6 +6,10 @@ set -e
 cd "$(dirname "$0")/.."
 ELECTRON=${ELECTRON:-../../node_modules/electron/dist/electron}
 MODULE=${1:-build/out/vesktop_media.node}
+# absolute: the cases run from a temporary directory
+case $ELECTRON in /*) ;; *) ELECTRON=$PWD/$ELECTRON ;; esac
+case $MODULE in /*) ;; *) MODULE=$PWD/$MODULE ;; esac
+[ -x "$ELECTRON" ] || { echo "Electron not found at $ELECTRON (set ELECTRON=/path/to/electron)"; exit 1; }
 WORK=$(mktemp -d)
 SINK=
 GST=
@@ -15,7 +19,7 @@ check() {
     pattern=$1
     shift
     status=0
-    (cd "$WORK" && ELECTRON_RUN_AS_NODE=1 timeout 60 "$OLDPWD/$ELECTRON" "$OLDPWD/tools/fake-sfu.js" "$OLDPWD/$MODULE" "$@") > "$WORK/out" 2>&1 || status=$?
+    (cd "$WORK" && ELECTRON_RUN_AS_NODE=1 timeout 60 "$ELECTRON" "$OLDPWD/tools/fake-sfu.js" "$MODULE" "$@") > "$WORK/out" 2>&1 || status=$?
     grep -E "$pattern" "$WORK/out" || true
     [ $status -eq 0 ] || { echo "FAILED ($*), full output:"; cat "$WORK/out"; exit 1; }
 }
@@ -24,8 +28,15 @@ check() {
 echo "== undefined symbols"
 UNDEF=$(nm -D --undefined-only "$MODULE" | awk '$1 == "U" {print $2}' | grep -v -E '^(napi_|node_api_)|@GLIBC|^X(OpenDisplay|CloseDisplay|QueryKeymap)$|^_ITM_|^__gmon_start__$|^_Jv_' || true)
 if [ -n "$UNDEF" ]; then echo "unexpected undefined symbols:"; echo "$UNDEF"; exit 1; fi
+echo "== noise models (RNNoise by default, DeepFilterNet, Standard = libwebrtc's suppression)"
+mkdir -p "$WORK/noise"
+VESKTOP_MEDIA_FAKE_MIC=speech ELECTRON_RUN_AS_NODE=1 timeout 60 "$ELECTRON" tools/noise-models.js "$MODULE" "$WORK/noise" || { echo "FAILED (noise models)"; exit 1; }
 echo "== speaking"
 check "onConnect|inbound|summary" --seconds 4
+# the reflected audio (user 222) must be reported as speaking: Discord's client shows who speaks from that callback
+grep -q 'speaking \["222",1' "$WORK/out" || { echo "FAILED: no speaking callback for the remote user"; exit 1; }
+# the keepalive answer (0x1337f00d, as Discord's servers send it) must reach the ping callback: Discord shows the ping from it
+grep -q 'ping callback \[' "$WORK/out" || { echo "FAILED: no ping callback"; exit 1; }
 echo "== silent (expect 10 Opus silence frames, then nothing)"
 check "summary" --seconds 3 --vad 0
 echo "== DAVE turned off by a transition (once deadlocked the JS thread)"

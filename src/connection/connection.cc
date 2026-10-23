@@ -301,6 +301,7 @@ void Connection::Destroy()
     }
     engine.Worker()->BlockingCall([this] {
         audioStatsTask_.Stop();
+        remoteSpeakingTask_.Stop();
         DestroyVideoSendStream();
         if (cameraAcquired_) Camera::Get().Release(this);
         cameraAcquired_ = false;
@@ -360,6 +361,13 @@ void Connection::CreateCall()
     call_->SignalChannelNetworkState(webrtc::MediaType::AUDIO, webrtc::kNetworkUp);
     call_->SignalChannelNetworkState(webrtc::MediaType::VIDEO, webrtc::kNetworkUp);
     ConfigureSendStream();
+    // Discord's client learns who is speaking from the module (the speaking callback, for every user): the gateway
+    // only tells it a user's flags. With the browser's WebRTC it measures the received audio itself
+    remoteSpeakingTask_ = webrtc::RepeatingTaskHandle::DelayedStart(engine.Worker(), webrtc::TimeDelta::Millis(50), [this] {
+        if (!call_) return webrtc::TimeDelta::PlusInfinity();
+        UpdateRemoteSpeaking();
+        return webrtc::TimeDelta::Millis(50);
+    });
     // A call where nobody hears anybody: whether packets flow at all, in each direction
     audioStatsTask_ = webrtc::RepeatingTaskHandle::DelayedStart(engine.Worker(), webrtc::TimeDelta::Seconds(10), [this] {
         if (!call_ || !sendStream_) return webrtc::TimeDelta::PlusInfinity();
@@ -384,6 +392,14 @@ void Connection::CreateCall()
         lastRtcpIn_ = rtcp;
         lastDecryptionFailures_ = dec;
         lastRoutingFailures_ = route;
+        uint64_t ps = pingsSent_, pe = pingsEchoed_, pt = pingsTimedOut_, sh = shortPacketsIn_;
+        line += "; pings: " + std::to_string(ps - lastPingsSent_) + " sent, " + std::to_string(pe - lastPingsEchoed_) +
+                " echoed, " + std::to_string(pt - lastPingsTimedOut_) + " timed out (rtt " + std::to_string(lastRttMs_.load()) +
+                " ms), " + std::to_string(sh - lastShortPacketsIn_) + " other short packets";
+        lastPingsSent_ = ps;
+        lastPingsEchoed_ = pe;
+        lastPingsTimedOut_ = pt;
+        lastShortPacketsIn_ = sh;
         VV_LOGI("conn", "audio packets in the last 10 s (%s): %s", context_.c_str(), line.c_str());
         return webrtc::TimeDelta::Seconds(10);
     });
@@ -561,6 +577,32 @@ void Connection::OnVideoSeen(uint32_t ssrc)
         return JsCallback::Args{Napi::String::New(env, userId), Napi::Number::New(env, ssrc),
                                 Napi::String::New(env, std::to_string(ssrc)), env.Undefined()};
     });
+}
+
+// Worker, every 50 ms: a remote user speaks while their decoded audio is above about -40 dBFS, and 300 ms after
+void Connection::UpdateRemoteSpeaking()
+{
+    constexpr int kAudibleLevel = 330;      // AudioReceiveStream's audio_level is 0..32767
+    constexpr int64_t kHoldMs = 300;
+    int64_t now = NowMs();
+    std::vector<std::pair<std::string, int>> changes;
+    {
+        std::lock_guard lock(usersMutex_);
+        for (auto& [id, user] : users_) {
+            if (!user.stream) continue;
+            if (user.stream->GetStats(false).audio_level > kAudibleLevel) user.lastAudibleMs = now;
+            bool speaking = now - user.lastAudibleMs < kHoldMs;
+            // the gateway's flags say what the audio is (voice, soundshare, priority); voice if it said nothing
+            int flags = speaking ? (user.speakingFlags & ~kSpeakingHidden ? user.speakingFlags & ~kSpeakingHidden : kSpeakingVoice) : 0;
+            if (flags == user.reportedFlags) continue;
+            user.reportedFlags = flags;
+            changes.emplace_back(id, flags);
+        }
+    }
+    for (auto& [id, flags] : changes)
+        callbacks.speaking.Call([id, flags](Napi::Env env) {
+            return JsCallback::Args{Napi::String::New(env, id), Napi::Number::New(env, flags), env.Null()};
+        });
 }
 
 void Connection::ApplyGains(RemoteUser& user)
@@ -968,7 +1010,7 @@ void Connection::SendPing()
     uint32_t seq = pingSeq_++;
     WriteU32LE(pkt + 4, seq);
     pendingPings_[seq] = NowMs();
-    SendRaw(pkt, sizeof(pkt));
+    if (SendRaw(pkt, sizeof(pkt))) pingsSent_++;
 }
 
 void Connection::NetworkLoop()
@@ -1003,6 +1045,7 @@ void Connection::NetworkLoop()
             }
             uint32_t seq = it->first;
             it = pendingPings_.erase(it);
+            pingsTimedOut_++;
             std::string host;
             int port;
             {
@@ -1047,13 +1090,15 @@ void Connection::HandlePacket(const uint8_t* data, size_t length, const SocketAd
         return;
     }
 
-    // keepalive echo
-    if (length == 8 && ReadU32(data) == 0x1337cafe) {
+    // keepalive answer: Discord's voice servers answer 13 37 ca fe + sequence with 13 37 f0 0d + the same sequence
+    // (an echo, 13 37 ca fe, is what the fake SFU sends)
+    if (length == 8 && (ReadU32(data) == 0x1337f00d || ReadU32(data) == 0x1337cafe)) {
         uint32_t seq = ReadU32LE(data + 4);
         auto it = pendingPings_.find(seq);
         if (it == pendingPings_.end()) return;
         int rtt = static_cast<int>(NowMs() - it->second);
         pendingPings_.erase(it);
+        pingsEchoed_++;
         lastRttMs_ = rtt;
         auto host = from.Host();
         int port = from.Port();
@@ -1064,7 +1109,17 @@ void Connection::HandlePacket(const uint8_t* data, size_t length, const SocketAd
         return;
     }
 
-    if (length < 12 || (data[0] >> 6) != 2) return;
+    if (length < 12 || (data[0] >> 6) != 2) {
+        // neither discovery, nor a ping echo, nor RTP / RTCP: logged (a few) to see what the server sends instead
+        shortPacketsIn_++;
+        if (shortPacketsLogged_ < 5) {
+            shortPacketsLogged_++;
+            char hex[3 * 16 + 1] = {};
+            for (size_t i = 0; i < std::min<size_t>(length, 16); i++) snprintf(hex + 3 * i, 4, "%02x ", data[i]);
+            VV_LOGI("conn", "unexpected packet (%s), %zu bytes: %s", context_.c_str(), length, hex);
+        }
+        return;
+    }
     if (IsRtcp(data, length)) {
         rtcpIn_++;
         HandleRtcp(data, length);

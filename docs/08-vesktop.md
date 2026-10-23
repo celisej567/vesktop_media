@@ -3,7 +3,11 @@
 Code in Vesktop: `src/main/discordVoice.ts`, `src/main/mainWindow.ts`, `src/main/venmic.ts`,
 `src/preload/discordVoice.ts`, `src/renderer/patches/nativeVoice.ts`, `src/renderer/nativeVoiceExtensions.ts`,
 `src/renderer/components/NativeStreamSettings.tsx`, `src/renderer/components/CameraOptionsEditor.tsx`,
-`src/renderer/components/settings/NativeVoiceToggle.tsx`.
+`src/renderer/components/NoiseModelPicker.tsx`, `src/renderer/components/settings/NativeVoiceToggle.tsx`.
+
+Vesktop's renderer code is run by the preload before the page has a document element: nothing in `src/renderer` may
+touch the DOM when its file is evaluated (only when something renders), or the whole bundle stops (no Vesktop
+settings, no patches, and Discord falls back to the WebRTC engine).
 
 ## Choosing and loading the engine
 
@@ -50,6 +54,10 @@ The preload (`loadDiscordVoice`) then:
 | `"change-windows"`, `getUseSystemScreensharePicker(){` | use the system picker (portal) on Linux |
 | `max_bitrate:e.maxBitrate` | the gateway's VIDEO message declares the user's stream bitrate for the layers of our own stream (`streamMaxBitrate`) |
 | `location:"UserSettingsCameraSelect"` | adds our camera options (resolution, frame rate, autofocus) under Discord's camera select |
+| `VOICE_NOISE_SUPPRESSION_SETTING,{` | the noise suppression setting: RNNoise and DeepFilterNet in the place of Krisp (see Noise suppression below) |
+| `vadKrispActivationThreshold=.8` | Discord's settings read-back: the noise cancellation flag stays as it was saved (`getNoiseOverrides`) |
+| `noiseCancellation:!1}),(0,` | start-up: the saved noise cancellation flag is not reset (`keepsNoiseCancellation`) |
+| `canGoLive:(0,` and `"WGWHv/"` | the noise button of the call panel and its popout |
 
 ## The Go Live flow
 
@@ -105,9 +113,10 @@ unpaused with the defaults rather than left paused.
 
 ## The extensions
 
-What vesktop_media offers beyond the API Discord's JS uses, declared by the feature `vesktop_device_options`.
-`vesktopVoice()` in `nativeVoiceExtensions.ts` returns the engine only when `engineKind` is `vesktop` and that
-feature is declared; with WebRTC or the official module all of these UI parts are hidden.
+What vesktop_media offers beyond the API Discord's JS uses, declared by the features `vesktop_device_options` and
+`vesktop_noise_models`. `vesktopVoice()` and `hasNoiseModels()` in `nativeVoiceExtensions.ts` return the engine only
+when `engineKind` is `vesktop` and the feature is declared; with WebRTC or the official module all of these UI parts
+are hidden.
 
 | Function / option | Used for |
 |---|---|
@@ -115,9 +124,35 @@ feature is declared; with WebRTC or the official module all of these UI parts ar
 | `setVideoInputDeviceOptions(id, options)` | saved camera options (applied at start-up), a device stream's options |
 | `getNativeScreenSharePickedSource()` | screen or window, and the window's application, to preselect its audio |
 | `setVideoEncoderPreference(pref)`, `getVideoEncoders()` | the H.264 / H.265 encoder setting under the engine select, and what is in use |
+| `setNoiseModel(model)`, `getNoiseModel()`, `NoiseModel`, `isRnNoiseSupported()`, `isDeepFilterSupported()` | the noise suppression choice of Voice & Video settings, see below |
 | transport options `vesktopVideoBitrate`, `vesktopAudioBitrate` (bit/s, 0 = Discord's) | the stream settings' bitrates |
 | `setGoLiveDevices({videoInputDeviceId, audioInputDeviceId})` | part of Discord's API too; the microphone id is one of our input device names |
 
+### Noise suppression
+
+Discord hands the processing choices to the engine as four flags (`echoCancellation`, `noiseSuppression`,
+`automaticGainControl`, `noiseCancellation`) in the engine's `setTransportOptions`: for calls (`nd()` / `no()` in
+Discord's media engine store), for the mic test (`setLoopback` options), for voice messages
+(`startLocalAudioRecording` options) and through the input profiles ("Voice Isolation" sets `noiseCancellation`).
+They stay the only way to switch noise suppression on and off. `noiseCancellation` is the slot of Discord's Krisp, which
+vesktop_media cannot load (Discord checks for the `discord_krisp` module itself), so the engine answers it with a model
+of its own: `setNoiseModel` selects `RNNOISE` (default), `DEEPFILTERNET` or `STANDARD` (libwebrtc's suppression, also the fallback when a
+model cannot run). The patch of
+`VOICE_NOISE_SUPPRESSION_SETTING` puts RNNoise and DeepFilterNet in the place of the Krisp entry; both set the flag
+and the model (`onNoiseOptionSelected`), Vesktop's setting `nativeVoiceNoiseModel` remembers the model and applies it
+at start-up. Discord forces the flag off when Krisp is unsupported in two places, so two more patches leave that out:
+in the settings it reads back (`getNoiseOverrides`), and once at start-up, where it saves the flag off when the engine
+does not declare Krisp's feature (`keepsNoiseCancellation`; without it the saved choice of a model was gone after a
+restart and the setting showed "None").
+
+**The noise button of the call panel.** Discord shows it (a microphone with a wave, next to the connection info, in the
+voice panel at the bottom left) only when Krisp is supported. A patch makes the panel treat noise cancellation as
+supported with vesktop_media, so the button is there, and a second one replaces what its popout shows: the Krisp
+switch becomes a list with the same four choices as the settings (`NoiseModelPicker.tsx`: none, standard, RNNoise,
+DeepFilterNet), and the Krisp advertisement and the text under the list (replaced by one that describes the choices)
+are left out. A choice dispatches what Discord's own setting does (the
+noise cancellation flag, and the suppression the other way) and selects the model.
+
 Settings Vesktop stores for this engine: `voiceEngine`, `nativeVoiceVideoEncoder`, `nativeVoiceDeviceOptions`
-(per camera guid), `nativeVoiceAppSettings` (the module's own settings) and, in its renderer state,
+(per camera guid), `nativeVoiceNoiseModel`, `nativeVoiceAppSettings` (the module's own settings) and, in its renderer state,
 `nativeScreenshareQuality` (resolution, frame rate, content type, video and audio bitrate).

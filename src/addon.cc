@@ -1,5 +1,5 @@
 // N-API entry point: the complete export table Discord's JS uses (99 engine exports, VoiceConnection with its
-// 66 methods, VoiceReplayConnection). What is not implemented yet is a stub that
+// 66 methods, VoiceReplayConnection) and our own 11 (the Vesktop extensions, NoiseModel, vesktopVoiceInfo). What is not implemented yet is a stub that
 // accepts the arguments and answers callbacks with neutral values.
 #include <napi.h>
 
@@ -8,6 +8,7 @@
 
 #include <thread>
 
+#include "audio/deepfilter.h"
 #include "audio/rnnoise.h"
 #include "common/js.h"
 #include "common/log.h"
@@ -93,9 +94,9 @@ std::vector<std::string> SupportedFeatures()
             // video send
             "set_video_device_by_id",
             // Vesktop extensions (Discord's JS knows nothing of them): getVideoInputDeviceCapabilities, setVideoInputDeviceOptions,
-            // getNativeScreenSharePickedSource, setVideoEncoderPreference, getVideoEncoders, transport options
+            // getNativeScreenSharePickedSource, setVideoEncoderPreference, getVideoEncoders, setNoiseModel, transport options
             // vesktopVideoBitrate / vesktopAudioBitrate
-            "vesktop_device_options"};
+            "vesktop_device_options", "vesktop_noise_models"};
 }
 
 // ------------------------------------------------------------------------------------------ VoiceConnection
@@ -562,6 +563,32 @@ Napi::Value GetVideoEncoders(Info info)
     return FromJson(info.Env(), r);
 }
 
+// Vesktop extension: which noise model answers Discord's noise cancellation flag. NoiseModel: STANDARD, RNNOISE
+// (default), DEEPFILTERNET
+Napi::Value SetNoiseModel(Info info)
+{
+    int model = static_cast<int>(ToNum(Arg(info, 0), 1));
+    if (model < 0 || model > 2) model = 1;
+    E().SetNoiseModel(static_cast<NoiseModel>(model));
+    return info.Env().Undefined();
+}
+
+Napi::Value GetNoiseModel(Info info)
+{
+    return Napi::Number::New(info.Env(), static_cast<int>(E().GetNoiseModel()));
+}
+
+// Vesktop extension: whether a model really processes audio here
+Napi::Value IsRnNoiseSupported(Info info)
+{
+    return Napi::Boolean::New(info.Env(), Engine::NoiseModelSupported(NoiseModel::RnNoise));
+}
+
+Napi::Value IsDeepFilterSupported(Info info)
+{
+    return Napi::Boolean::New(info.Env(), Engine::NoiseModelSupported(NoiseModel::DeepFilter));
+}
+
 // Vesktop extension: setVideoInputDeviceOptions(deviceId, {width, height, frameRate, autofocus})
 Napi::Value SetVideoInputDeviceOptions(Info info)
 {
@@ -771,6 +798,7 @@ Napi::Value VesktopVoiceInfo(Info info)
     o.Set("screenCapture", true);
     o.Set("dave", static_cast<double>(discord::dave::MaxSupportedProtocolVersion()));
     o.Set("noiseCancellation", RnNoise::Available());
+    o.Set("deepFilter", DeepFilter::Available());
     return o;
 }
 
@@ -823,6 +851,15 @@ Napi::Object Init(Napi::Env env, Napi::Object exports)
     fn("getNativeScreenSharePickedSource", GetNativeScreenSharePickedSource);
     fn("setVideoEncoderPreference", SetVideoEncoderPreference);
     fn("getVideoEncoders", GetVideoEncoders);
+    fn("setNoiseModel", SetNoiseModel);
+    fn("getNoiseModel", GetNoiseModel);
+    fn("isRnNoiseSupported", IsRnNoiseSupported);
+    fn("isDeepFilterSupported", IsDeepFilterSupported);
+    auto noiseModel = Napi::Object::New(env);
+    noiseModel.Set("STANDARD", 0);
+    noiseModel.Set("RNNOISE", 1);
+    noiseModel.Set("DEEPFILTERNET", 2);
+    exports.Set("NoiseModel", noiseModel);
     fn("setInputVolume", SetInputVolume);
     fn("setOutputVolume", SetOutputVolume);
     exports.Set("setDeviceChangeCallback", Napi::Function::New(env, SLOT_SETTER(deviceChange)));

@@ -19,6 +19,7 @@ add_library(vesktop_media MODULE
     src/common/log.cc
     src/common/platform.cc
     src/audio/adm.cc
+    src/audio/deepfilter.cc
     src/audio/mixer.cc
     src/audio/rnnoise.cc
     src/audio/soundshare.cc

@@ -14,7 +14,7 @@
 //
 // What it checks:
 //   * IP discovery request/response, onConnect transport info
-//   * keepalive pings (0x1337cafe + u32 LE sequence), ping callback
+//   * keepalive pings (0x1337cafe + u32 LE sequence, answered with 0x1337f00d), ping callback
 //   * aead_aes256_gcm_rtpsize RTP/RTCP layout: decrypts every packet with a known key
 //   * receive path: re-encrypts our own audio as remote user "222" (ssrc 9999) and checks inbound stats
 //   * video send path (--video VP8): our camera (fake capture) is sent back as user "222"'s camera, so it
@@ -245,11 +245,14 @@ sock.on("message", (msg, from) => {
         return;
     }
 
-    // keepalive / latency ping: 0x1337cafe + u32 LE sequence, echoed back unchanged
+    // keepalive / latency ping: 0x1337cafe + u32 LE sequence. Discord's voice servers answer 0x1337f00d + the same
+    // sequence (seen in a real call), so does this one
     if (msg.length === 8 && msg.readUInt32BE(0) === 0x1337cafe) {
         counts.ping++;
         log("ping seq", msg.readUInt32LE(4));
-        sock.send(msg, from.port, from.address);
+        const answer = Buffer.from(msg);
+        answer.writeUInt32BE(0x1337f00d, 0);
+        sock.send(answer, from.port, from.address);
         return;
     }
 

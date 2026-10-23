@@ -1,4 +1,5 @@
-// RNNoise (BSD) as the noise canceller, in the slot Discord's JS knows as Krisp. librnnoise is loaded at runtime; without it noise cancellation reports an error
+// RNNoise (BSD) as the noise canceller, in the slot Discord's JS knows as Krisp. libvesktop_rnnoise.so (scripts/build-denoise.sh)
+// is loaded at runtime from the module's own directory, never from the system; without it noise cancellation reports an error
 // through setVoiceProcessingErrorCallback and audio passes unchanged.
 #pragma once
 

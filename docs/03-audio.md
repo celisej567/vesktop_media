@@ -5,14 +5,14 @@ Code: `src/engine/engine.cc`, `src/audio/`, the send gate in `src/connection/con
 ## The audio graph
 
 ```
-microphone ─► libwebrtc ADM (PulseAudio) ─► CaptureAdm: input gain, RNNoise ─► APM ─► CaptureTap
+microphone ─► libwebrtc ADM (PulseAudio) ─► CaptureAdm: input gain, RNNoise / DeepFilterNet ─► APM ─► CaptureTap
                                                                                        │
                        Engine::OnProcessedCapture: level, WebRTC VAD, mic test loopback, voice message
                                                                                        │
                      every "default" connection: OnCaptureFrame → send gate (FrameGate) ─► Opus ─► RTP
 remote users' Opus ─► NetEq (one receive stream per user) ─┐
-mic test loopback ─────────────────────────────────────────┼─► Mixer (pan, mute, output volume, soft limit) ─► ADM ─► speakers
-soundboard / local samples ────────────────────────────────┘
+soundboard / local samples ────────────────────────────────┴─► Mixer (pan, mute, output volume, soft limit) ─► ADM ─► speakers
+mic test loopback (from OnProcessedCapture) ─► added in CaptureAdm::NeedMorePlayData, after the echo reference was taken ─► speakers
 application audio (PulseAudio monitors) ─► Soundshare ─► stream connection's own AudioState ─► Opus (stereo) ─► RTP
 ```
 
@@ -43,6 +43,15 @@ Nothing records the microphone while Vesktop is not in a call.
 * `setInputDevice` / `setOutputDevice` accept a guid, a name, an index or `"default"` (`FindDevice`). **Setting the
   device that is already in use does nothing**: Discord sets the device again on every device list change (a
   Bluetooth headset appearing), and restarting the same device would drop the audio for a moment each time.
+* **The microphone stays on the source that was picked.** Tools such as Easy Effects move every ordinary recording
+  stream onto their own source, whichever one it asked for (checked: the stream asked for the microphone's source and
+  was linked to Easy Effects Source, so the microphone and "Easy Effects Source" sounded the same). PipeWire's pulse server
+  copies the properties of the client to its streams, and a stream with `node.dont-move` is left alone. libwebrtc's
+  PulseAudio module cannot set stream properties, and the `PA_STREAM_DONT_MOVE` flag does not stop that move, so
+  `Engine::Initialize` sets `PULSE_PROP=node.dont-move=true` while the audio device module connects and gives the
+  variable back right after. Consequence: "default" and a named microphone give that microphone, without
+  Easy Effects' filters (pick "Easy Effects Source" for them), and a stream on "default" does not follow a change of
+  the system's default source until the capture restarts.
 * `PollDevices` compares the lists every 2 s and calls the device change callback with inputs, outputs and cameras.
   The camera list comes from the camera's cache, which never opens a device (see [07](07-capture.md)).
 * Input volume is a gain applied in `CaptureAdm` (0 to 4); output volume a gain in the mixer. The system volumes are
@@ -57,11 +66,26 @@ Nothing records the microphone while Vesktop is not in a call.
 * automatic gain control: **AGC2 adaptive digital only**, with Discord's parameters (headroom 5 dB, max gain 50 dB,
   initial gain 15 dB, 6 dB/s, max output noise -50 dBFS). AGC1's analog stage is left off: it would work by changing the
   system microphone volume;
-* noise cancellation is RNNoise (`audio/rnnoise.cc`, librnnoise loaded at runtime), run in `CaptureAdm` before the
-  APM on each channel. If librnnoise is not there, the voice processing error callback tells JS (code 2). Krisp is not available: Krisp's module only loads into the official client;
-  `setKrispPath` is accepted and ignored.
+* the `noiseCancellation` flag (the slot of Discord's Krisp, which is not available: Krisp's module only loads into
+  the official client, `setKrispPath` is accepted and ignored) runs the model selected with `setNoiseModel`
+  (`Engine::SetNoiseModel`): **RNNoise** by default (`audio/rnnoise.cc`, `libvesktop_rnnoise.so` loaded from the
+  module's directory), run in `CaptureAdm` before the APM on each channel; if the library is not there, the voice
+  processing error callback tells JS (code 2). **Standard**, and a model that cannot run (no library, a DeepFilterNet
+  state that could not be created) is libwebrtc's suppression: `ApplyProcessing` turns the flag into
+  `noiseSuppression` then. Options and model that did not change are not applied again, and the log says what was
+  applied (`processing applied: aec ns agc nc (model, denoiser)`);
+* the model can also be **DeepFilterNet** (`audio/deepfilter.cc`, `setNoiseModel(DEEPFILTERNET)`), run at the
+  same place on 10 ms mono frames. Creating its state loads the model (about 0.1 s), so that happens on a thread of
+  its own and the audio passes unchanged meanwhile; a state is freed away from the audio thread too. A frame costs
+  about 0.9 ms inside Vesktop (the log reports the average every 10 s). Its stages always run (`df_set_thresholds`, our
+  addition to its C API, upper thresholds at 100 dB): with DeepFilterNet's defaults a clean microphone's local SNR
+  hovers around the thresholds where it skips its stages, they switch on and off from frame to frame and the voice
+  pulsed (clean speech, noise 30 dB below: 6 % of the speech frames jumped by more than 3 dB, none after). It gives no speech probability, so voice
+  activity uses the WebRTC VAD with it. If the state cannot be created the engine falls back to the standard
+  suppression. Measured on DeepFilterNet's own speech sample mixed with noise at 5 dB SNR (`VESKTOP_MEDIA_FAKE_MIC=file:`):
+  speech above the noise in pauses by 6.9 dB without suppression, 12.5 dB standard, 21.1 dB RNNoise, 24.0 dB DeepFilterNet.
 
-While no connection exists, the mic test (`setLoopbackOptions`) and the voice message recorder use their own
+While no connection exists, the mic test (`setLoopback` options) and the voice message recorder use their own
 processing options, so the test sounds like the settings being tried.
 
 ## Voice activity, push to talk and the send gate
@@ -70,7 +94,7 @@ Every processed 10 ms capture frame (`OnProcessedCapture`) gets:
 
 * a level (`VolumeAnalyzer`, dBFS, smoothed);
 * a WebRTC GMM VAD decision at the aggressiveness from `vadAutoThreshold`;
-* RNNoise's speech probability when noise cancellation runs.
+* RNNoise's speech probability when RNNoise runs.
 
 Each "default" connection then decides whether to send (`Connection::OnCaptureFrame`):
 
@@ -88,7 +112,8 @@ are used and receivers see no gap. When the gate closes, and when encryption is 
 silence frames (`f8 ff fe`) first, so receivers' jitter buffers end cleanly instead of concealing. The same object
 then does the DAVE encryption of the frame ([04](04-connection.md)).
 
-The speaking callback reports flags (1 voice, 2 soundshare, 4 priority) whenever they change;
+The speaking callback reports flags (1 voice, 2 soundshare, 4 priority) whenever they change, for our own user here
+and for the others from their received audio ([04](04-connection.md));
 "speaking while muted" is reported once per stretch of speech.
 
 ## Opus
@@ -107,7 +132,6 @@ Receive streams decode stereo Opus, use the jitter buffer minimum Discord asks f
 
 * every receive stream of every connection, with per-ssrc pan (`setLocalPan`) and mute (local mute, deafen). A muted
   stream is still pulled, so its jitter buffer keeps draining and unmuting does not play stale audio;
-* the mic test loopback (at most 200 ms queued);
 * local samples (soundboard previews, `startSamplesLocalPlayback`), resampled to 48 kHz stereo, with a done callback.
 
 Then the output volume and a soft limiter (tanh above about -2.7 dBFS): several people talking at once saturate
@@ -115,11 +139,35 @@ softly instead of clipping. User volumes (`setLocalVolume`) are applied as the r
 
 ## Mic test and voice messages
 
-* `setLoopbackOptions(true, options)` plays the processed capture back through the mixer. The loopback follows the
-  input device: `setInputDevice` restarts the capture, and the mixer keeps reading the processed frames.
+Outside a call libwebrtc captures at its default of 8 kHz (the APM then runs at 16 kHz), because the capture rate
+follows the audio *senders*, and a call's Opus sender is what raises it to 48 kHz. Left like that the signal is band
+limited before any processing: the mic test and voice messages sounded like a phone, and, played at the wrong rate,
+too high and crackling. `Engine::UpdateAudioRunning` therefore gives the audio transport a sender that discards
+everything (`NullAudioSender`, 48 kHz mono) while the capture runs without a connection. A connection's own send
+stream sets the senders itself, so nothing is installed while one exists. As a fallback (a stream connection only, no
+call), `OnProcessedCapture` resamples a lower capture rate to 48 kHz, so the loopback, the analysis and the WAV
+(48 kHz in its header) never get another rate.
+
+* `setLoopback(true, options)` plays the processed capture back (queue of at most 200 ms in the mixer, played by
+  `MixLoopbackInto`, see below). The loopback follows the input device: `setInputDevice` restarts the capture, and the
+  mixer keeps reading the processed frames.
 * `startLocalAudioRecording` writes the processed capture as a 48 kHz mono 16-bit WAV to the data directory
   (`voice-message-<ms>.wav`); `stopLocalAudioRecording` patches the header and returns the path and duration. This is
   the only use of the data directory.
+
+The loopback is **not** part of the mixer's normal output. `CaptureAdm::NeedMorePlayData` lets libwebrtc mix and take
+its echo reference first, then `Mixer::MixLoopbackInto` adds the loopback to the samples that go to the device
+(resampled when the device does not play at 48 kHz). With the loopback in the reference the echo canceller took the
+test's own voice for echo from the speakers and suppressed the microphone while it played back: the test pulsed,
+louder and closer speech less so, whatever the noise suppression. The cost: with speakers (not headphones) the test
+is no longer protected from acoustic feedback by the echo canceller.
+
+Discord sends the loopback options again with every audio setting (three calls for one click), so repeating
+`setLoopback(true)` keeps the queue; only turning it on starts a fresh one. The mixer starts playing once 30 ms are
+queued and buffers again after running dry, and `vesktop_media.log` reports the queue depth, underruns and dropped
+samples every 2 s while the test runs. When the processing options really change, the mic test is silenced for about
+350 ms (short ramps): a stage that was just switched on (noise suppression, echo cancellation, RNNoise) starts
+without its noise estimate and lets noise through for a moment. Options that did not change are not applied again.
 
 ## Stream audio (soundshare)
 

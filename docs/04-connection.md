@@ -25,11 +25,15 @@ module only speaks **UDP** to the SFU: one socket per connection for IP discover
 `NetworkLoop` polls the socket every 10 ms and handles every datagram:
 
 * the discovery response (74 bytes, type 2);
-* **keepalive echoes**: every `setPingInterval` ms (default 5 s) an 8-byte ping `13 37 ca fe` + sequence (u32 LE)
-  goes out; the echo gives the round trip time to the ping callback. A ping without an answer within 4 s calls the
+* **keepalive pings**: every `setPingInterval` ms (default 5 s) an 8-byte ping `13 37 ca fe` + sequence (u32 LE)
+  goes out. Discord's servers answer `13 37 f0 0d` + the same sequence (not an echo: seen in a real call, where only
+  echoes were expected and every ping timed out, which Discord shows as a ping of 4000 ms); the answer gives the
+  round trip time to the ping callback. An echo is accepted too. A ping without an answer within 4 s calls the
   ping timeout callback, from which JS judges the connection's health;
 * RTCP (packet type 200 to 206) and RTP: decrypted, then posted to the worker, which delivers them to the `Call`.
-  RTP is routed by ssrc to audio or video; an unknown ssrc is counted as a routing failure.
+  RTP is routed by ssrc to audio or video; an unknown ssrc is counted as a routing failure;
+* anything else (not discovery, ping answer, RTP or RTCP) is counted, and the first few are logged with their bytes
+  (`unexpected packet`).
 
 `setUdpEndpoint` changes the destination (JS may move the connection to another SFU port); `fastUdpReconnect` sends a
 ping right away to refresh NAT bindings.
@@ -87,6 +91,12 @@ payload types from `audioDecoders`, NetEq jitter buffer up to 200 packets, the u
 per user). Volume, local mute, pan and deafen are applied through the stream's gain and the mixer
 ([03](03-audio.md)).
 
+**Who is speaking.** Discord's client learns that from the module: the speaking callback, for every user, not only
+our own. The gateway's SPEAKING message only gives a user's flags (voice, soundshare, priority), which JS passes on
+with `setRemoteUserSpeakingStatus`. `UpdateRemoteSpeaking` (worker, every 50 ms) reads each receive stream's decoded
+audio level; a user speaks while it is above about -40 dBFS and 300 ms after, and the callback gets their flags (voice
+if the gateway gave none). Without it nobody lit up although everybody was heard.
+
 ## Bandwidth estimation
 
 The `Call`'s bitrate configuration:
@@ -119,5 +129,5 @@ from libwebrtc's stream and call stats.
 ## Region latency test
 
 `rankRtcRegions` (`transport/region_tester.cc`) pings every candidate region's addresses with the same 8-byte ping
-on a thread of its own and returns the regions ordered by round trip time. Discord's JS uses it to pick a voice
-region.
+on a thread of its own (the answers are recognised as above) and returns the regions ordered by round trip time.
+Discord's JS uses it to pick a voice region.

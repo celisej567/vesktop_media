@@ -17,11 +17,13 @@ const Api* GetApi()
 {
     static Api api = [] {
         Api a;
-        void* h = OpenLibrary({"librnnoise.so.0", "librnnoise.so"});
+        std::string path;
+        void* h = OpenLocalLibrary("libvesktop_rnnoise.so", &path);
         if (!h) {
-            VV_LOGW("rnnoise", "librnnoise not found, noise cancellation unavailable");
+            VV_LOGW("rnnoise", "libvesktop_rnnoise.so not found next to the module, noise cancellation unavailable");
             return a;
         }
+        VV_LOGI("rnnoise", "loaded %s", path.c_str());
         a.create = reinterpret_cast<void* (*)(void*)>(LibrarySymbol(h, "rnnoise_create"));
         a.destroy = reinterpret_cast<void (*)(void*)>(LibrarySymbol(h, "rnnoise_destroy"));
         a.process = reinterpret_cast<float (*)(void*, float*, const float*)>(LibrarySymbol(h, "rnnoise_process_frame"));

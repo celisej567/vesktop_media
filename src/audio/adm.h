@@ -16,6 +16,7 @@
 #include <thread>
 #include <vector>
 
+#include "audio/deepfilter.h"
 #include "audio/rnnoise.h"
 
 namespace vv {
@@ -27,7 +28,13 @@ public:
     static webrtc::scoped_refptr<CaptureAdm> Create(webrtc::scoped_refptr<webrtc::AudioDeviceModule> inner);
 
     void SetInputGain(float gain) { gain_ = gain; }
-    void SetNoiseCancellation(bool enabled) { noiseCancellation_ = enabled; }
+    // The noise canceller that runs on the capture before libwebrtc's processing. Switching one on starts from a
+    // fresh state: an old one has the last speech of whenever it was running
+    enum class Denoiser { None, RnNoise, DeepFilter };
+    void SetDenoiser(Denoiser denoiser)
+    {
+        if (denoiser_.exchange(denoiser) != denoiser && denoiser != Denoiser::None) resetDenoiser_ = true;
+    }
     bool NoiseCancellationAvailable() const { return RnNoise::Available(); }
     // speech probability of the last frame, -1 when the noise canceller is off
     float VoiceProbability() const { return voiceProbability_; }
@@ -152,10 +159,12 @@ private:
     webrtc::AudioTransport* downstream_ = nullptr;
     std::vector<int16_t> buffer_;
     std::atomic<float> gain_{1.0f};
-    std::atomic<bool> noiseCancellation_{false};
+    std::atomic<Denoiser> denoiser_{Denoiser::None};
+    std::atomic<bool> resetDenoiser_{false};
     std::atomic<float> voiceProbability_{-1};
     std::atomic<uint64_t> ncFrames_{0}, ncTimeUs_{0};
     std::unique_ptr<RnNoise> rnnoise_[2];
+    std::unique_ptr<DeepFilter> deepFilter_[2];
 };
 
 } // namespace vv

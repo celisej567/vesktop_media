@@ -32,6 +32,18 @@ void* OpenLibrary(std::initializer_list<const char*> names, bool isolated)
     return nullptr;
 }
 
+void* OpenLocalLibrary(const char* name, std::string* path)
+{
+    auto dir = ModuleDirectory();
+    if (dir.empty()) return nullptr;
+    auto local = std::filesystem::path(dir) / name;
+    std::error_code ec;
+    if (!std::filesystem::exists(local, ec)) return nullptr;
+    void* h = dlopen(local.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (h && path) *path = local.string();
+    return h;
+}
+
 void* LoadedLibrary(const char* name)
 {
     return dlopen(name, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);

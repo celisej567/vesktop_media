@@ -12,6 +12,9 @@ namespace vv {
 // libraries whose symbol names may already be in the process from another version (system FFmpeg next to
 // Electron's libffmpeg)
 void* OpenLibrary(std::initializer_list<const char*> names, bool isolated = false);
+// Like OpenLibrary, but only from the directory of vesktop_media.node: never the system's copy. For the libraries
+// that ship with the module (noise suppression). `path`, if given, gets the file that was loaded
+void* OpenLocalLibrary(const char* name, std::string* path = nullptr);
 // A library already loaded into the process, or null (never loads anything)
 void* LoadedLibrary(const char* name);
 void* LibrarySymbol(void* library, const char* name);

@@ -51,7 +51,8 @@ void RankRtcRegions(std::vector<RegionEndpoints> regions, std::function<void(std
                 SocketAddress from;
                 ssize_t n;
                 while ((n = sock->RecvFrom(buf, sizeof(buf), from)) >= 8) {
-                    if (ReadU32(buf) != 0x1337cafe) continue;
+                    // the answer to 13 37 ca fe is 13 37 f0 0d (an echo from test servers)
+                    if (ReadU32(buf) != 0x1337f00d && ReadU32(buf) != 0x1337cafe) continue;
                     uint32_t seq = ReadU32LE(buf + 4);
                     if (seq < probes.size() && probes[seq].rttMs < 0) {
                         probes[seq].rttMs = NowMs() - probes[seq].sentMs;

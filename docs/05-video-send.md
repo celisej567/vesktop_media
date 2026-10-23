@@ -115,7 +115,7 @@ preference. The two need opposite encoder settings:
 | frame dropper | on | off |
 | quality scaling (lower resolution) | off | on |
 | max QP (VP8) | 56 | 63 |
-| libvpx denoising | off | off |
+| libvpx denoising (a screen; a camera has it on) | off | off |
 
 The table is what the module asks of libwebrtc; how much of it applies depends on the encoder. For VP8 all of it.
 For H.264 and H.265 (FFmpeg) the encoder's own CBR rate control decides the quality: the FFmpeg encoder reports no
