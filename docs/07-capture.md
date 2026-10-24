@@ -111,15 +111,16 @@ reports, becomes the usual sizes inside it) come from the same queries. `Camera:
 request from that list instead of asking libwebrtc, and whether a camera has an autofocus control (a request to the
 camera) is asked only when the camera options are opened.
 
-The device list is cached. It is rebuilt only while nothing captures, and only when what is in
+The device list is cached and follows the cameras while they come and go. It is rebuilt when what is in
 `/sys/class/video4linux` changed (the nodes, their names, and for v4l2loopback nodes such as OBS Virtual Camera their
-`state` and `format`, all read without opening a device). The virtual camera's state counts because its node exists
-all the time but has formats only while OBS feeds it: with the nodes alone it stayed out of the list until a restart.
-A change has to stay for one more poll (2 s), and enumerations are at least 5 s apart: a camera that is plugging in,
-resetting or being taken by another program makes its nodes come and go every few seconds, and opening it meanwhile
-(power up, power down) could only make that worse. `getVideoInputDevices` and the
-device change callback report the cache; nothing is reported before the first enumeration finished, because an empty
-list would look to Discord as if every camera had been unplugged.
+`state` and `format`, all read without opening a device), also during a call or a preview: listing sends nothing to
+the cameras, so a running capture is not disturbed. The virtual camera's state counts because its node exists all the
+time: it is a capture device (`state: capture`) only while OBS feeds it and an output device (`state: output`, no
+format) otherwise, so it appears in the list when OBS starts its virtual camera and goes when OBS stops it. A change
+has to stay for one more poll (2 s), and enumerations are at least 3 s apart: a camera that is plugging in or
+resetting makes its nodes come and go every few seconds. `getVideoInputDevices` and the device change callback report
+the cache; nothing is reported before the first enumeration finished, because an empty list would look to Discord as
+if every camera had been unplugged.
 
 ### Users
 

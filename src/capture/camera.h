@@ -38,7 +38,7 @@ public:
     json Devices() const;
     // False until the first enumeration finished (an empty list before that must not be reported)
     bool Ready() const { return ready_; }
-    // Re-enumerates when the set of device nodes changed (async, no-op while capturing)
+    // Re-enumerates when the set of device nodes changed (async, also while a camera captures)
     void Refresh();
     // Enumerates now if needed, then `done(devices)` on the camera thread
     void GetDevices(std::function<void(const json&)> done);

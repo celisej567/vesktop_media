@@ -386,12 +386,9 @@ void Camera::Enumerate()
 
 void Camera::Refresh()
 {
-    if (capturing_) return;
+    // Also while a camera captures: listing sends nothing to the cameras (EnumerateModes), so a running capture is not
+    // disturbed, and the list follows cameras that come and go (OBS Virtual Camera switched off) in a call too
     Post([this] {
-        {
-            std::lock_guard lock(mutex_);
-            if (capturing_ || !users_.empty()) return;
-        }
         if (fake_) {
             if (!ready_) Enumerate();
             return;
@@ -403,16 +400,14 @@ void Camera::Refresh()
         }
         auto now = std::chrono::steady_clock::now();
         if (ready_) {
-            // Enumerating opens every camera. A camera that is plugging in, resetting or being taken by another
-            // program (OBS) makes its nodes come and go every few seconds, and opening it meanwhile (power up,
-            // power down) kept it doing that: wait until the nodes stay as they are for one more poll, and not
-            // more often than every 5 s
+            // A camera that is plugging in or resetting makes its nodes come and go every few seconds: wait until
+            // they stay as they are for one more poll, and not more often than every 3 s
             if (sig != pendingSignature_) {
                 if (pendingSignature_.empty()) VV_LOGI("camera", "the camera nodes changed, waiting for them to settle");
                 pendingSignature_ = sig;
                 return;
             }
-            if (now - lastEnumerated_ < std::chrono::seconds(5)) return;
+            if (now - lastEnumerated_ < std::chrono::seconds(3)) return;
         }
         pendingSignature_.clear();
         signature_ = sig;
