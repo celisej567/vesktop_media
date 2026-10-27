@@ -25,6 +25,7 @@
 #include "capture/camera.h"
 #include "video/video_sinks.h"
 #include "common/log.h"
+#include "common/platform.h"
 #include "common/util.h"
 #include "connection/connection.h"
 
@@ -125,7 +126,7 @@ void Engine::Initialize(const json& options)
     webrtc::LogMessage::LogToDebug(webrtc::LS_NONE); // no stderr
     webrtc::LogMessage::SetLogToStderr(false);
     webrtc::LogMessage::AddLogToStream(&webrtcLog, logLevel >= 3 ? webrtc::LS_INFO : webrtc::LS_WARNING);
-    dataDirectory_ = dir.empty() ? std::filesystem::temp_directory_path().string() : dir;
+    dataDirectory_ = dir.empty() ? PathToUtf8(std::filesystem::temp_directory_path()) : dir;
     fakeAudio_ = vv::Get(options, "useFakeAudioCapture", false);
     Camera::Get().SetFake(vv::Get(options, "useFakeVideoCapture", false));
     Camera::Get().SetSelectionChangedCallback([this] {
@@ -152,9 +153,11 @@ void Engine::Initialize(const json& options)
         // onto their own source, so the microphone and "Easy Effects Source" would both end up on the latter.
         // libwebrtc's PulseAudio module cannot set stream properties (or the DONT_MOVE flag, which does not stop that
         // move), so the client's own are set while it connects, and given back right after
+#ifndef _WIN32
         const char* oldProp = getenv("PULSE_PROP");
         std::string oldPropValue = oldProp ? oldProp : "";
         setenv("PULSE_PROP", (oldPropValue.empty() ? std::string() : oldPropValue + " ") .append("node.dont-move=true").c_str(), 1);
+#endif
         webrtc::scoped_refptr<webrtc::AudioDeviceModule> platform;
         if (!fakeAudio_) platform = webrtc::CreateAudioDeviceModule(*env_, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
         if (!platform) {
@@ -173,11 +176,13 @@ void Engine::Initialize(const json& options)
         audioState_ = webrtc::AudioState::Create(config);
 
         adm_->Init();
+#ifndef _WIN32
         if (oldProp) setenv("PULSE_PROP", oldPropValue.c_str(), 1);
         else unsetenv("PULSE_PROP");
+#endif
         adm_->RegisterAudioCallback(audioState_->audio_transport());
-        adm_->SetPlayoutDevice(0);
-        adm_->SetRecordingDevice(0);
+        SelectDevice(false, kDefaultDevice);
+        SelectDevice(true, kDefaultDevice);
         adm_->InitSpeaker();
         adm_->InitMicrophone();
         bool stereo = false;
@@ -395,9 +400,24 @@ json Engine::OutputDevices()
     return worker_->BlockingCall([&] { return DeviceList(false); });
 }
 
+// PulseAudio's device 0 is its default device; Windows' devices are only the endpoints, the default one is selected
+// by role (and follows the system setting when that changes)
+void Engine::SelectDevice(bool input, int index)
+{
+#ifdef _WIN32
+    if (index == kDefaultDevice) {
+        if (input) adm_->SetRecordingDevice(webrtc::AudioDeviceModule::kDefaultDevice);
+        else adm_->SetPlayoutDevice(webrtc::AudioDeviceModule::kDefaultDevice);
+        return;
+    }
+#endif
+    if (input) adm_->SetRecordingDevice(static_cast<uint16_t>(index));
+    else adm_->SetPlayoutDevice(static_cast<uint16_t>(index));
+}
+
 int Engine::FindDevice(bool input, const std::string& id)
 {
-    if (id.empty() || id == "default") return 0;
+    if (id.empty() || id == "default") return kDefaultDevice;
     auto list = DeviceList(input);
     for (auto& d : list)
         if (d["guid"] == id || d["name"] == id) return d["index"].get<int>();
@@ -405,7 +425,7 @@ int Engine::FindDevice(bool input, const std::string& id)
     long index = strtol(id.c_str(), &end, 10);
     if (end && *end == 0 && index >= 0 && index < static_cast<long>(list.size())) return static_cast<int>(index);
     VV_LOGW("engine", "device %s not found, using the default", id.c_str());
-    return 0;
+    return kDefaultDevice;
 }
 
 void Engine::SetInputDevice(const std::string& id)
@@ -420,7 +440,7 @@ void Engine::SetInputDevice(const std::string& id)
         recordingDevice_ = index;
         bool wasRecording = adm_->Recording();
         if (wasRecording) adm_->StopRecording();
-        adm_->SetRecordingDevice(static_cast<uint16_t>(index));
+        SelectDevice(true, index);
         adm_->InitMicrophone();
         analyzer_.Reset();
         VV_LOGI("engine", "input device -> %d (%s)", index, id.c_str());
@@ -439,7 +459,7 @@ void Engine::SetOutputDevice(const std::string& id)
         playoutDevice_ = index;
         bool wasPlaying = adm_->Playing();
         if (wasPlaying) adm_->StopPlayout();
-        adm_->SetPlayoutDevice(static_cast<uint16_t>(index));
+        SelectDevice(false, index);
         adm_->InitSpeaker();
         VV_LOGI("engine", "output device -> %d (%s)", index, id.c_str());
         if (wasPlaying) UpdateAudioRunning();
@@ -593,8 +613,8 @@ bool Engine::StartLocalRecording(const json& options)
     {
         std::lock_guard lock(recordingMutex_);
         if (recordingFile_) fclose(recordingFile_);
-        recordingPath_ = (std::filesystem::path(dataDirectory_) / ("voice-message-" + std::to_string(NowMs()) + ".wav")).string();
-        recordingFile_ = fopen(recordingPath_.c_str(), "wb");
+        recordingPath_ = PathToUtf8(PathFromUtf8(dataDirectory_) / ("voice-message-" + std::to_string(NowMs()) + ".wav"));
+        recordingFile_ = OpenFile(recordingPath_, "wb");
         recordingFrames_ = 0;
         if (!recordingFile_) return false;
         uint8_t header[44] = {};

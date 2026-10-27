@@ -4,7 +4,9 @@
 
 #include <api/scoped_refptr.h>
 
+#ifndef _WIN32
 #include "capture/gio_api.h"
+#endif
 #include "common/js.h"
 
 #include <functional>
@@ -49,7 +51,9 @@ public:
 private:
     void Run(uint32_t types, std::function<void(Outcome, const std::string&)> done);
     void CloseSessionLocked();
+#ifndef _WIN32
     GDBusConnection* Bus(GError** err);
+#endif
 
     std::mutex mutex_;
     std::thread thread_;
@@ -59,8 +63,10 @@ private:
     std::unique_ptr<PipeWireCapturer> capturer_;
     webrtc::scoped_refptr<FrameSource> source_;
     unsigned counter_ = 0;
+#ifndef _WIN32
     std::mutex busMutex_;
     GDBusConnection* bus_ = nullptr;
+#endif
 };
 
 } // namespace vv

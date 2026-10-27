@@ -133,7 +133,14 @@ private:
     void ApplyProcessing();
     void PollDevices();
     json DeviceList(bool input);
+    // index into DeviceList(), or kDefaultDevice: the system's default (Windows), device 0 (PulseAudio)
+#ifdef _WIN32
+    static constexpr int kDefaultDevice = -1;
+#else
+    static constexpr int kDefaultDevice = 0;
+#endif
     int FindDevice(bool input, const std::string& id);
+    void SelectDevice(bool input, int index);
     void WriteRecording(const float* samples, size_t frames);
 
     bool initialized_ = false;

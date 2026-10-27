@@ -15,4 +15,4 @@ What is not solved or not verified yet. The reasons behind the fixes already mad
   `RTLD_DEEPBIND`, the configuration that crashed with x264. It is reached only when the bundled library is missing.
 * **glibc.** A build runs only with a glibc at least as new as the build machine's. A build in an older container has
   not been set up.
-* **Not implemented:** Windows and macOS backends, AV1 / VP9 encoding, AMD / Intel hardware encoders, Krisp.
+* **Not implemented:** macOS backends (Windows: [11](11-windows.md), with what is not verified there), AV1 / VP9 encoding, AMD / Intel hardware encoders, Krisp.

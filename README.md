@@ -1,10 +1,11 @@
 # vesktop_media
 
-Open reimplementation of Discord's native media engine (`discord_voice.node`) for Linux. It keeps the original's
+Open reimplementation of Discord's native media engine (`discord_voice.node`) for Linux and Windows. It keeps the original's
 API, so Discord's web client running in Vesktop can use it as `MediaEngineNative`. It is built as
 `vesktop_media.node` and ships with Vesktop (see [Using it with Vesktop](#using-it-with-vesktop)).
 
-Status: the engine is complete for Linux.
+Status: the engine is complete for Linux; Windows 10 (2004+) / 11 has the same features, see
+[docs/11-windows.md](docs/11-windows.md) (built and tested in a VM; not yet tried in a real call).
 * **Voice:** transport (all 7 encryption modes), DAVE end-to-end encryption, Opus, the processing chain, VAD, the
   mic test, soundboard / local samples, stats.
 * **Video receive:** VP8, VP9, AV1 (libwebrtc), H.264 and H.265 (FFmpeg), with DAVE.
@@ -12,7 +13,7 @@ Status: the engine is complete for Linux.
   layers, bitrate and degradation handling.
 * **Go Live:** screens and windows (xdg-desktop-portal ScreenCast + PipeWire), a camera as the source, stream audio
   (soundshare, PulseAudio per application or a microphone).
-* **Not done:** Windows and macOS backends, AV1 / VP9 encoding, AMD / Intel hardware encoders.
+* **Not done:** macOS, AV1 / VP9 encoding, AMD / Intel hardware encoders.
 
 How it works and why it is built this way: [docs/](docs/README.md) (architecture, threads, audio, transport,
 video, capture, the Vesktop integration, diagnostics, open problems).
@@ -25,11 +26,14 @@ sh scripts/build.sh   # -> build/out/{index.js,vesktop_media.node,libvesktop_ffm
 sh scripts/test.sh    # fake SFU acceptance tests against build/out
 ```
 
+Windows: `powershell -ExecutionPolicy Bypass -File scripts\build.ps1` and `scripts\test.ps1` (needs Visual Studio 2022
+or its Build Tools, LLVM 22, CMake, Ninja, Git, pnpm, Rust; see [docs/11-windows.md](docs/11-windows.md)).
+
 The scripts do not depend on where the project lives or on the user: every path is relative to this directory,
 CMake build directories made elsewhere are started over, and the binaries carry no source paths of the build
 machine (`-ffile-prefix-map`).
 
-**Needs** (from the system), Linux x86-64 only (the prebuilt libwebrtc is x86-64): clang, cmake, ninja, make, nasm, git,
+**Needs** on Linux (from the system), x86-64 only (the prebuilt libwebrtc is x86-64): clang, cmake, ninja, make, nasm, git,
 curl, pkg-config and pnpm; autoconf, automake and libtool (RNNoise); cargo, Rust 1.70 or newer (DeepFilterNet); the
 development headers of GLib / GIO, PipeWire (`libpipewire-0.3`), PulseAudio (`libpulse`, soundshare), nlohmann-json,
 and the kernel's `linux/videodev2.h` (cameras). Tests also need Node and Electron (see Tests). `build.sh` stops at the

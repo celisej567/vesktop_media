@@ -7,6 +7,8 @@
 #include <filesystem>
 #include <mutex>
 
+#include "common/platform.h"
+
 namespace vv {
 
 namespace {
@@ -35,8 +37,8 @@ void Rotate()
     if (!gFile) return;
     fclose(gFile);
     std::error_code ec;
-    std::filesystem::rename(gPath, gPath + ".1", ec);
-    gFile = fopen(gPath.c_str(), "w");
+    std::filesystem::rename(PathFromUtf8(gPath), PathFromUtf8(gPath + ".1"), ec);
+    gFile = OpenFile(gPath, "w");
     gWritten = 0;
 }
 
@@ -47,7 +49,11 @@ void Write(const char* level, const char* tag, const char* message)
     auto t = system_clock::to_time_t(now);
     int ms = static_cast<int>(duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000);
     tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
     localtime_r(&t, &tm);
+#endif
     char ts[32];
     strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm);
 
@@ -74,9 +80,9 @@ void LogInit(const std::string& directory, int level, size_t maxBytes)
 
     if (gFile || directory.empty()) return;
     std::error_code ec;
-    std::filesystem::create_directories(directory, ec);
-    gPath = (std::filesystem::path(directory) / "vesktop_media.log").string();
-    gFile = fopen(gPath.c_str(), "a");
+    std::filesystem::create_directories(PathFromUtf8(directory), ec);
+    gPath = PathToUtf8(PathFromUtf8(directory) / "vesktop_media.log");
+    gFile = OpenFile(gPath, "a");
     if (gFile) {
         fseek(gFile, 0, SEEK_END);
         gWritten = static_cast<size_t>(ftell(gFile));

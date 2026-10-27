@@ -21,6 +21,9 @@
 #include "capture/camera.h"
 #include "capture/pipewire_capturer.h"
 #include "capture/portal.h"
+#ifdef _WIN32
+#include "capture/desktop_capture_win.h"
+#endif
 #include "audio/soundshare.h"
 #include "common/log.h"
 #include "connection/connection.h"
@@ -269,36 +272,56 @@ void Connection::SetDesktopSource(const json& options)
         ClearDesktopSource();
         return;
     }
-    std::unique_ptr<PipeWireCapturer> capturer;
+    auto onEnded = [this](const std::string&) {
+        // the capture ended on its own (portal session closed from the system UI, window closed…): JS stops the stream
+        callbacks.desktopSourceEnded.Call([](Napi::Env env) { return JsCallback::Args{Napi::Number::New(env, 0), env.Null()}; });
+    };
+    auto unavailable = [this](int reason) {
+        callbacks.desktopSourceEnded.Call([reason](Napi::Env env) {
+            return JsCallback::Args{Napi::Number::New(env, 1), Napi::Number::New(env, reason)};
+        });
+    };
+    std::unique_ptr<ScreenCapturer> capturer;
     webrtc::scoped_refptr<FrameSource> source;
+#ifdef _WIN32
+    // Windows: the screen / window id from the Go Live picker (DesktopPreviews)
+    char* end = nullptr;
+    long long id = std::strtoll(sourceId.c_str(), &end, 10);
+    if ((type != "screen" && type != "window") || sourceId.empty() || *end != 0) {
+        VV_LOGE("video", "desktop source %s:%s is not a screen or window", type.c_str(), sourceId.c_str());
+        unavailable(1);
+        return;
+    }
+    source = webrtc::make_ref_counted<FrameSource>(true, "desktop");
+    auto desktop = std::make_unique<DesktopCaptureWin>(type == "screen" ? DesktopCaptureWin::Kind::Screen : DesktopCaptureWin::Kind::Window,
+                                                       id, source, onEnded);
+    if (!desktop->Start()) {
+        unavailable(2);
+        return;
+    }
+    capturer = std::move(desktop);
+#else
+    std::unique_ptr<PipeWireCapturer> portalCapture;
     PickedSource picked;
-    if (type == "prepicked" && ScreenCastPortal::Get().TakeCapture(capturer, source)) {
+    if (type == "prepicked" && ScreenCastPortal::Get().TakeCapture(portalCapture, source)) {
         // already running since the pick
+        portalCapture->SetEnded(onEnded);
     } else if (type != "prepicked" || !ScreenCastPortal::Get().TakePicked(picked)) {
         // screen: / window: ids are X11 / Windows enumerations; on Wayland everything goes through the portal
         VV_LOGE("video", "desktop source %s:%s is not available (only portal picks are supported)", type.c_str(), sourceId.c_str());
-        callbacks.desktopSourceEnded.Call([](Napi::Env env) {
-            return JsCallback::Args{Napi::Number::New(env, 1), Napi::Number::New(env, 1)};
-        });
+        unavailable(1);
         return;
-    }
-    auto onEnded = [this](const std::string&) {
-        // the portal session ended (stopped from the system UI, window closed…): JS stops the stream
-        callbacks.desktopSourceEnded.Call([](Napi::Env env) { return JsCallback::Args{Napi::Number::New(env, 0), env.Null()}; });
-    };
-    if (!capturer) {
+    } else {
         source = webrtc::make_ref_counted<FrameSource>(true, "desktop");
-        capturer = std::make_unique<PipeWireCapturer>(picked, source, onEnded);
-        if (!capturer->Start()) {
-            callbacks.desktopSourceEnded.Call([](Napi::Env env) {
-                return JsCallback::Args{Napi::Number::New(env, 1), Napi::Number::New(env, 2)};
-            });
+        portalCapture = std::make_unique<PipeWireCapturer>(picked, source, onEnded);
+        if (!portalCapture->Start()) {
+            unavailable(2);
             return;
         }
-    } else {
-        capturer->SetEnded(onEnded);
     }
-    std::unique_ptr<PipeWireCapturer> old;
+    capturer = std::move(portalCapture);
+#endif
+    std::unique_ptr<ScreenCapturer> old;
     {
         std::lock_guard lock(desktopMutex_);
         old = std::move(desktopCapturer_);
@@ -311,7 +334,7 @@ void Connection::SetDesktopSource(const json& options)
 
 void Connection::ClearDesktopSource()
 {
-    std::unique_ptr<PipeWireCapturer> old;
+    std::unique_ptr<ScreenCapturer> old;
     {
         std::lock_guard lock(desktopMutex_);
         old = std::move(desktopCapturer_);

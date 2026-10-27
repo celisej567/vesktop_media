@@ -1,19 +1,33 @@
 // Plain non-blocking IPv4/IPv6 UDP socket
 #pragma once
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <netinet/in.h>
 #include <sys/socket.h>
+#endif
 
 #include <cstdint>
+#include <initializer_list>
 #include <mutex>
 #include <optional>
 #include <string>
 
 namespace vv {
 
+#ifdef _WIN32
+using SocketHandle = SOCKET;
+using SocketLength = int;
+#else
+using SocketHandle = int;
+using SocketLength = socklen_t;
+#endif
+
 struct SocketAddress {
     sockaddr_storage storage{};
-    socklen_t length = 0;
+    SocketLength length = 0;
 
     static std::optional<SocketAddress> Resolve(const std::string& host, int port);
     std::string Host() const;
@@ -30,16 +44,24 @@ public:
 
     bool Open(int family);
     void Close();
-    int Fd() const { return fd_; }
+    bool IsOpen() const;
+    SocketHandle Handle() const { return fd_; }
     bool SendTo(const uint8_t* data, size_t length, const SocketAddress& to);
     // -1 when nothing is pending
-    ssize_t RecvFrom(uint8_t* buffer, size_t capacity, SocketAddress& from);
+    int64_t RecvFrom(uint8_t* buffer, size_t capacity, SocketAddress& from);
     void SetDscp(int dscp);
     int LocalPort() const;
 
 private:
-    int fd_ = -1;
+#ifdef _WIN32
+    SocketHandle fd_ = INVALID_SOCKET;
+#else
+    SocketHandle fd_ = -1;
+#endif
     int family_ = AF_INET;
 };
+
+// Waits until one of the (open) sockets has something to read, at most timeoutMs. False on timeout
+bool WaitReadable(std::initializer_list<const UdpSocket*> sockets, int timeoutMs);
 
 } // namespace vv

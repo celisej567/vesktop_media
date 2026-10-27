@@ -56,6 +56,8 @@ const JS_INACTIVE = args.includes("--js-inactive");
 const SCREEN_NODE = opt("--screen");
 // --expect-source-end: the screen source goes away during the test; setOnDesktopSourceEnded must fire
 const EXPECT_SOURCE_END = args.includes("--expect-source-end");
+// --kill <pid>: that process (the captured window's) is killed 1.5 s after the desktop source was set
+const KILL_PID = Number(opt("--kill") ?? 0);
 let sourceEnded = false;
 // --switch-camera: the selected camera is changed during the call (voice.setVideoInputDevice); the call must send
 // the new one at once (its own video report names the new camera), not when something else changes its video
@@ -73,7 +75,9 @@ const VIDEO_BITRATE = opt("--video-bitrate");
 const SOUNDSHARE_PID = opt("--soundshare");
 let soundshareAttached = false;
 let soundshareOk = true;
-if (SCREEN_NODE) process.env.VESKTOP_MEDIA_PIPEWIRE_NODE = SCREEN_NODE;
+// Linux: a PipeWire node taken as the portal's pick. Windows: "screen:<id>" or "window:<HWND>", as the Go Live picker
+// passes them (--screen screen:0 captures the first screen)
+if (SCREEN_NODE && process.platform !== "win32") process.env.VESKTOP_MEDIA_PIPEWIRE_NODE = SCREEN_NODE;
 const CLIP_DIR = opt("--clip-dir");
 // DAVE epoch 1 + transition 0 without an MLS group: DAVE turns off, which once deadlocked the JS thread
 const DAVE_RESET = args.includes("--dave-reset");
@@ -447,7 +451,13 @@ sock.bind(0, "127.0.0.1", () => {
                     if (VIDEO_BITRATE) conn.setTransportOptions({ vesktopVideoBitrate: Number(VIDEO_BITRATE) });
                     conn.setVideoBroadcast(true);
                 } else if (VIDEO && SCREEN_NODE) {
-                    conn.setDesktopSourceWithOptions({ type: "prepicked", sourceId: "prepicked:0" });
+                    if (KILL_PID) setTimeout(() => process.kill(KILL_PID), 1500);
+                    if (process.platform === "win32") {
+                        const [type, sourceId] = SCREEN_NODE.split(":");
+                        conn.setDesktopSourceWithOptions({ type, sourceId });
+                    } else {
+                        conn.setDesktopSourceWithOptions({ type: "prepicked", sourceId: "prepicked:0" });
+                    }
                     conn.setOnDesktopSourceEnded?.((...a) => { sourceEnded = true; log("desktop source ended", JSON.stringify(a)); });
                     // what Discord sends for the "Source" resolution: no size, remoteSinkWantsPixelCount 0, no
                     // alwaysSendVideo. The encoder must still run
@@ -501,7 +511,13 @@ sock.bind(0, "127.0.0.1", () => {
                             log("inbound video from 222:", v ? JSON.stringify({ ssrc: v.ssrc, codec: v.codecName, decoder: v.decoderImplementationName, framesDecoded: v.framesDecoded, width: v.width, height: v.height, packets: v.rtpStats?.packets }) : "none");
                             log("video sink:", JSON.stringify({ frames: video.frames, size: video.size, nonBlack: video.nonBlack, firstFrame: video.firstFrame }));
                             const size = LOOP_VIDEO ? (LAYERS > 1 ? "640x360" : "1280x720") : "320x240";
-                            videoOk = video.frames >= 10 && video.size === size && video.nonBlack && video.firstFrame != null && v?.framesDecoded > 0;
+                            // a screen or window keeps its size and aspect ratio, scaled down into 1280x720 when larger
+                            const fitted = sz => {
+                                const [w, h] = (sz ?? "0x0").split("x").map(Number);
+                                return w > 0 && h > 0 && w <= 1280 && h <= 720;
+                            };
+                            const sizeOk = SCREEN_NODE ? fitted(video.size) : video.size === size;
+                            videoOk = video.frames >= 10 && sizeOk && video.nonBlack && video.firstFrame != null && v?.framesDecoded > 0;
                             if (WANTS_LATE) {
                                 log("late wants:", JSON.stringify({ selfVideoActive, videoPacketsBeforeWants: wantsAt, total: counts.rtp[VIDEO_PT] }));
                                 videoOk = videoOk && selfVideoActive === true && wantsAt === 0;

@@ -48,7 +48,7 @@ struct AvFrameHead {
 };
 constexpr size_t kFramePtsOffset = 136;
 
-constexpr const char* kBundledFfmpeg = "libvesktop_ffmpeg.so";
+constexpr const char* kBundledFfmpeg = VV_LOCAL_LIBRARY("ffmpeg");
 
 struct Api {
     std::string source;
@@ -116,10 +116,18 @@ const Api* LoadApi()
             delete a;
         }
         for (int v : {63, 62, 61, 60, 59, 58}) {
+#ifdef _WIN32
+            // the FFmpeg DLLs shipped next to the module (scripts/build-ffmpeg.ps1), never one from PATH
+            auto codec = "avcodec-" + std::to_string(v) + ".dll";
+            void* h = OpenLocalLibrary(codec.c_str());
+            auto utilName = "avutil-" + std::to_string(v - 2) + ".dll";
+#else
             auto codec = "libavcodec.so." + std::to_string(v);
             void* h = OpenLibrary({codec.c_str()}, true);
+            auto utilName = "libavutil.so." + std::to_string(v - 2);
+#endif
             if (!h) continue;
-            void* util = LoadedLibrary(("libavutil.so." + std::to_string(v - 2)).c_str());
+            void* util = LoadedLibrary(utilName.c_str());
             auto* a = new Api();
             a->source = codec;
             if (util && a->Load(h, util)) {

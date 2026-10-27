@@ -60,7 +60,7 @@ struct Sodium {
     {
         static Sodium s = [] {
             Sodium r;
-            void* h = OpenLibrary({"libsodium.so.26", "libsodium.so.23", "libsodium.so"});
+            void* h = OpenLibrary({"libsodium.so.26", "libsodium.so.23", "libsodium.so", "libsodium.dll"});
             if (!h) {
                 VV_LOGE("crypto", "xsalsa20_poly1305 modes need libsodium, which was not found");
                 return r;

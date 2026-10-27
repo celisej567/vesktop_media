@@ -13,7 +13,11 @@ enum class LogLevel { Verbose = 0, Info = 1, Warning = 2, Error = 3 };
 // 2 = info (Discord's default with debug logging on), >= 3 = verbose
 void LogInit(const std::string& directory, int level, size_t maxBytes);
 bool LogEnabled(LogLevel level);
+#if defined(__GNUC__) || defined(__clang__)
 void Log(LogLevel level, const char* tag, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
+#else
+void Log(LogLevel level, const char* tag, const char* fmt, ...);
+#endif
 void LogV(LogLevel level, const char* tag, const char* fmt, va_list args);
 // Log lines coming from JS (consoleLog)
 void LogRaw(const std::string& level, const std::string& message);

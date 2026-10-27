@@ -1,7 +1,5 @@
 #include "transport/region_tester.h"
 
-#include <poll.h>
-
 #include <algorithm>
 #include <map>
 #include <thread>
@@ -44,12 +42,11 @@ void RankRtcRegions(std::vector<RegionEndpoints> regions, std::function<void(std
         int64_t deadline = NowMs() + 5000;
         size_t answered = 0;
         while (answered < probes.size() && NowMs() < deadline) {
-            pollfd fds[2] = {{v4.Fd(), POLLIN, 0}, {v6.Fd(), POLLIN, 0}};
-            if (poll(fds, 2, static_cast<int>(std::max<int64_t>(1, deadline - NowMs()))) <= 0) continue;
+            if (!WaitReadable({&v4, &v6}, static_cast<int>(std::max<int64_t>(1, deadline - NowMs())))) continue;
             for (auto* sock : {&v4, &v6}) {
                 uint8_t buf[64];
                 SocketAddress from;
-                ssize_t n;
+                int64_t n;
                 while ((n = sock->RecvFrom(buf, sizeof(buf), from)) >= 8) {
                     // the answer to 13 37 ca fe is 13 37 f0 0d (an echo from test servers)
                     if (ReadU32(buf) != 0x1337f00d && ReadU32(buf) != 0x1337cafe) continue;

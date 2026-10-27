@@ -25,8 +25,6 @@
 #include <rtc_base/thread.h>
 #include <rtc_base/time_utils.h>
 
-#include <poll.h>
-
 #include <algorithm>
 #include <cmath>
 #include <random>
@@ -1018,12 +1016,11 @@ void Connection::NetworkLoop()
     SendDiscovery();
     uint8_t buf[2048];
     while (running_) {
-        pollfd pfd{socket_.Fd(), POLLIN, 0};
-        poll(&pfd, 1, 10);
+        WaitReadable({&socket_}, 10);
         int64_t now = NowMs();
 
         SocketAddress from;
-        ssize_t n;
+        int64_t n;
         while ((n = socket_.RecvFrom(buf, sizeof(buf), from)) > 0) {
             packetsReceived_++;
             bytesReceived_ += n;

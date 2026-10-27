@@ -6,6 +6,21 @@
 
 namespace vv {
 
+std::filesystem::path PathFromUtf8(const std::string& utf8)
+{
+    return std::filesystem::path(utf8);
+}
+
+std::string PathToUtf8(const std::filesystem::path& path)
+{
+    return path.string();
+}
+
+FILE* OpenFile(const std::string& utf8Path, const char* mode)
+{
+    return fopen(utf8Path.c_str(), mode);
+}
+
 std::string ModuleDirectory()
 {
     static const std::string dir = [] {

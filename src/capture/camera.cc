@@ -9,16 +9,10 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <memory>
-#include <filesystem>
-#include <fstream>
-#include <sstream>
 
-#include <fcntl.h>
-#include <linux/videodev2.h>
-#include <sys/ioctl.h>
-#include <unistd.h>
-
+#include "capture/camera_devices.h"
 #include "common/log.h"
 
 namespace vv {
@@ -28,126 +22,14 @@ namespace {
 constexpr const char* kFakeName = "Strobe Video Source";
 constexpr const char* kFakeName2 = "Strobe Video Source 2"; // a second one, to switch between (the tests)
 
-struct DeviceEntry {
-    std::string name, guid, path;
-    std::vector<std::array<int, 3>> formats; // width, height, fps
-    bool hasAutofocus = false;
-};
-
-// Whether a node has an autofocus control. Asked only when somebody wants to know (the camera options), never while
-// listing: a control query is a request to the camera itself
-bool HasAutofocus(const std::string& path)
-{
-    int fd = path.empty() ? -1 : open(path.c_str(), O_RDWR | O_NONBLOCK);
-    if (fd < 0) return false;
-    v4l2_queryctrl q{};
-    q.id = V4L2_CID_FOCUS_AUTO;
-    bool ok = ioctl(fd, VIDIOC_QUERYCTRL, &q) == 0 && !(q.flags & V4L2_CTRL_FLAG_DISABLED);
-    close(fd);
-    return ok;
-}
-
-// The (width, height, frame rate) modes a node offers, from the driver's own descriptors: VIDIOC_ENUM_FMT,
-// ENUM_FRAMESIZES and ENUM_FRAMEINTERVALS only. They answer from what the driver already knows and send nothing to
-// the camera. (libwebrtc's DeviceInfoV4l2 finds the modes with a VIDIOC_TRY_FMT per format and size, about 200 of
-// them: each one is a UVC probe request, and a camera that another program is streaming, an OBS source, reset on
-// them: it dropped off the USB bus, came back and was probed again while Vesktop was open)
-void EnumerateModes(int fd, std::vector<std::array<int, 3>>& out)
-{
-    auto add = [&](int w, int h, int fps) {
-        std::array<int, 3> m{w, h, std::max(1, fps)};
-        if (w > 0 && h > 0 && std::find(out.begin(), out.end(), m) == out.end()) out.push_back(m);
-    };
-    for (uint32_t fi = 0;; fi++) {
-        v4l2_fmtdesc fmt{};
-        fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        fmt.index = fi;
-        if (ioctl(fd, VIDIOC_ENUM_FMT, &fmt) != 0) break;
-        for (uint32_t si = 0;; si++) {
-            v4l2_frmsizeenum size{};
-            size.pixel_format = fmt.pixelformat;
-            size.index = si;
-            if (ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &size) != 0) break;
-            std::vector<std::pair<int, int>> sizes;
-            if (size.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
-                sizes.emplace_back(size.discrete.width, size.discrete.height);
-            } else {
-                // a range (v4l2loopback): the usual sizes inside it, and its largest
-                auto& r = size.stepwise;
-                static const int kUsual[][2] = {{160, 120}, {320, 180}, {320, 240}, {640, 360}, {640, 480},
-                                                {848, 480}, {960, 540}, {1280, 720}, {1600, 900}, {1920, 1080},
-                                                {2560, 1440}, {3840, 2160}};
-                for (auto& u : kUsual)
-                    if (u[0] >= static_cast<int>(r.min_width) && u[0] <= static_cast<int>(r.max_width) &&
-                        u[1] >= static_cast<int>(r.min_height) && u[1] <= static_cast<int>(r.max_height))
-                        sizes.emplace_back(u[0], u[1]);
-                sizes.emplace_back(r.max_width, r.max_height);
-            }
-            for (auto& [w, h] : sizes) {
-                bool any = false;
-                for (uint32_t ii = 0;; ii++) {
-                    v4l2_frmivalenum iv{};
-                    iv.pixel_format = fmt.pixelformat;
-                    iv.width = w;
-                    iv.height = h;
-                    iv.index = ii;
-                    if (ioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, &iv) != 0) break;
-                    if (iv.type == V4L2_FRMIVAL_TYPE_DISCRETE) {
-                        if (iv.discrete.numerator > 0) add(w, h, static_cast<int>(iv.discrete.denominator / iv.discrete.numerator));
-                        any = true;
-                    } else {
-                        // a range of intervals: the fastest, and 30 when it is within
-                        auto& r = iv.stepwise;
-                        if (r.min.numerator > 0) {
-                            int fastest = static_cast<int>(r.min.denominator / r.min.numerator);
-                            add(w, h, fastest);
-                            if (fastest > 30) add(w, h, 30);
-                        }
-                        any = true;
-                        break;
-                    }
-                }
-                if (!any) add(w, h, 30); // no intervals told
-            }
-            if (size.type != V4L2_FRMSIZE_TYPE_DISCRETE) break; // a range has just the one entry
-        }
-    }
-}
+using camera_devices::DeviceEntry;
 
 std::vector<DeviceEntry> ListDevices(bool fake)
 {
+    if (!fake) return camera_devices::List();
     std::vector<DeviceEntry> out;
-    if (fake) {
-        for (const char* name : {kFakeName, kFakeName2})
-            out.push_back({name, name, "", {{1920, 1080, 30}, {1280, 720, 60}, {1280, 720, 30}, {640, 360, 30}}, false});
-        return out;
-    }
-    // every /dev/videoN once, with queries only. A capture node is one whose device_caps say video capture (the
-    // nodes next to it are metadata); its guid is the bus_info libwebrtc names it by, its name the card
-    for (int i = 0; i < 64; i++) {
-        std::string path = "/dev/video" + std::to_string(i);
-        int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
-        if (fd < 0) continue;
-        v4l2_capability cap{};
-        bool capture = ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 &&
-                       (((cap.capabilities & V4L2_CAP_DEVICE_CAPS) ? cap.device_caps : cap.capabilities) & V4L2_CAP_VIDEO_CAPTURE);
-        if (capture) {
-            std::string guid = reinterpret_cast<const char*>(cap.bus_info);
-            bool seen = false;
-            for (auto& d : out) seen |= d.guid == guid;
-            if (!seen) {
-                DeviceEntry e{reinterpret_cast<const char*>(cap.card), guid, path};
-                EnumerateModes(fd, e.formats);
-                if (!e.formats.empty()) {
-                    std::sort(e.formats.begin(), e.formats.end(), [](auto& a, auto& b) {
-                        return a[0] * a[1] != b[0] * b[1] ? a[0] * a[1] > b[0] * b[1] : a[2] > b[2];
-                    });
-                    out.push_back(std::move(e));
-                }
-            }
-        }
-        close(fd);
-    }
+    for (const char* name : {kFakeName, kFakeName2})
+        out.push_back({name, name, "", {{1920, 1080, 30}, {1280, 720, 60}, {1280, 720, 30}, {640, 360, 30}}});
     return out;
 }
 
@@ -264,7 +146,7 @@ json Camera::Capabilities(const std::string& id)
     for (auto& d : devices_) {
         if (d.guid != guid) continue;
         if (!d.autofocusKnown) {
-            d.hasAutofocus = HasAutofocus(d.path);
+            d.hasAutofocus = camera_devices::HasAutofocus({d.name, d.guid, d.path, {}});
             d.autofocusKnown = true;
         }
         for (auto& f : d.formats) formats.push_back({{"width", f.width}, {"height", f.height}, {"frameRate", f.fps}});
@@ -304,23 +186,18 @@ void Camera::SetDeviceOptions(const std::string& id, const json& o)
 void Camera::ApplyAutofocus(const std::string& guid)
 {
     int value;
-    std::string path;
+    DeviceEntry device;
     {
         std::lock_guard lock(mutex_);
         auto it = options_.find(guid);
         if (it == options_.end() || it->second.autofocus < 0) return;
         value = it->second.autofocus;
         for (auto& d : devices_)
-            if (d.guid == guid) path = d.path;
+            if (d.guid == guid) device = {d.name, d.guid, d.path, {}};
     }
-    int fd = path.empty() ? -1 : open(path.c_str(), O_RDWR | O_NONBLOCK);
-    if (fd < 0) return;
-    v4l2_control c{};
-    c.id = V4L2_CID_FOCUS_AUTO;
-    c.value = value;
-    if (ioctl(fd, VIDIOC_S_CTRL, &c) != 0) VV_LOGW("camera", "%s: cannot set autofocus %d", guid.c_str(), value);
+    if (device.guid.empty()) return;
+    if (!camera_devices::SetAutofocus(device, value != 0)) VV_LOGW("camera", "%s: cannot set autofocus %d", guid.c_str(), value);
     else VV_LOGI("camera", "%s: autofocus %s", guid.c_str(), value ? "on" : "off");
-    close(fd);
 }
 
 webrtc::scoped_refptr<FrameSource> Camera::Source(const std::string& guid)
@@ -345,27 +222,6 @@ std::string Camera::EffectiveGuidLocked() const
     if (selected_ == "disabled") return "disabled";
     if (!selected_.empty()) return selected_;
     return devices_.empty() ? "" : devices_[0].guid;
-}
-
-// The set of device nodes, without opening any of them. v4l2loopback nodes (OBS Virtual Camera) are there all the
-// time but only have formats while a producer feeds them, so their state (sysfs `state`, `format`) counts too
-static std::string NodeSignature()
-{
-    std::vector<std::string> nodes;
-    std::error_code ec;
-    for (auto& e : std::filesystem::directory_iterator("/sys/class/video4linux", ec)) {
-        auto read = [&](const char* file) {
-            std::ifstream in(e.path() / file);
-            std::string s;
-            std::getline(in, s);
-            return s;
-        };
-        nodes.push_back(e.path().filename().string() + ":" + read("name") + ":" + read("state") + ":" + read("format"));
-    }
-    std::sort(nodes.begin(), nodes.end()); // the directory's order is not promised
-    std::string sig;
-    for (auto& n : nodes) sig += n + "\n";
-    return sig;
 }
 
 void Camera::Enumerate()
@@ -393,7 +249,7 @@ void Camera::Refresh()
             if (!ready_) Enumerate();
             return;
         }
-        auto sig = NodeSignature();
+        auto sig = camera_devices::Signature();
         if (ready_ && sig == signature_) {
             pendingSignature_.clear();
             return;
@@ -423,7 +279,7 @@ void Camera::GetDevices(std::function<void(const json&)> done)
 {
     Post([this, done = std::move(done)] {
         if (!ready_ && !capturing_) {
-            signature_ = fake_ ? "" : NodeSignature();
+            signature_ = fake_ ? "" : camera_devices::Signature();
             Enumerate();
         }
         done(Devices());

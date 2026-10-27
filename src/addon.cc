@@ -1,5 +1,5 @@
 // N-API entry point: the complete export table Discord's JS uses (99 engine exports, VoiceConnection with its
-// 66 methods, VoiceReplayConnection) and our own 11 (the Vesktop extensions, NoiseModel, vesktopVoiceInfo). What is not implemented yet is a stub that
+// 66 methods, VoiceReplayConnection) and our own 13 (the Vesktop extensions, NoiseModel, vesktopVoiceInfo). What is not implemented yet is a stub that
 // accepts the arguments and answers callbacks with neutral values.
 #include <napi.h>
 
@@ -19,6 +19,10 @@
 #include "transport/region_tester.h"
 #include "capture/camera.h"
 #include "capture/portal.h"
+#ifdef _WIN32
+#include "audio/audio_apps.h"
+#include "capture/desktop_capture_win.h"
+#endif
 #include "video/ffmpeg_encoder.h"
 #include "video/decoder_factory.h"
 #include "video/video_sinks.h"
@@ -96,7 +100,12 @@ std::vector<std::string> SupportedFeatures()
             // Vesktop extensions (Discord's JS knows nothing of them): getVideoInputDeviceCapabilities, setVideoInputDeviceOptions,
             // getNativeScreenSharePickedSource, setVideoEncoderPreference, getVideoEncoders, setNoiseModel, transport options
             // vesktopVideoBitrate / vesktopAudioBitrate
-            "vesktop_device_options", "vesktop_noise_models"};
+            "vesktop_device_options", "vesktop_noise_models",
+#ifdef _WIN32
+            // the Go Live picker's screens and windows come from the module (getScreenPreviews / getWindowPreviews)
+            "screen_previews", "window_previews",
+#endif
+    };
 }
 
 // ------------------------------------------------------------------------------------------ VoiceConnection
@@ -481,7 +490,12 @@ Napi::Value ReturnFalse(Info info)
 Napi::Value GetAudioSubsystem(Info info)
 {
     Later(Arg(info, 0), [](Napi::Env env) {
-        return JsCallback::Args{Napi::String::New(env, "standard"), Napi::String::New(env, E().FakeAudio() ? "dummy" : "linuxPulseAudio")};
+#ifdef _WIN32
+        const char* layer = "windowsCoreAudio";
+#else
+        const char* layer = "linuxPulseAudio";
+#endif
+        return JsCallback::Args{Napi::String::New(env, "standard"), Napi::String::New(env, E().FakeAudio() ? "dummy" : layer)};
     });
     return info.Env().Undefined();
 }
@@ -760,10 +774,32 @@ Napi::Value UpdateClipMetadata(Info info)
     return StubError(info, 3);
 }
 
-Napi::Value GetPreviews(Info info)
+// getScreenPreviews / getWindowPreviews(width, height, callback(sources)). Windows lists the screens and windows
+// with thumbnails (on a thread of its own: one frame of each takes a while); Linux has none, the portal picks
+Napi::Value GetPreviews(Info info, bool windows)
 {
+#ifdef _WIN32
+    auto cb = JsCallback::Create(Arg(info, 2), windows ? "windowPreviews" : "screenPreviews");
+    int width = Arg(info, 0).IsNumber() ? Arg(info, 0).As<Napi::Number>().Int32Value() : 150;
+    int height = Arg(info, 1).IsNumber() ? Arg(info, 1).As<Napi::Number>().Int32Value() : 150;
+    std::thread([cb, windows, width, height] {
+        auto list = DesktopPreviews(windows, width, height);
+        cb->Call([list](Napi::Env env) { return JsCallback::Args{FromJson(env, list)}; });
+    }).detach();
+#else
     Later(Arg(info, 2), [](Napi::Env env) { return JsCallback::Args{Napi::Array::New(env)}; });
+#endif
     return info.Env().Undefined();
+}
+
+Napi::Value GetScreenPreviews(Info info)
+{
+    return GetPreviews(info, false);
+}
+
+Napi::Value GetWindowPreviews(Info info)
+{
+    return GetPreviews(info, true);
 }
 
 // Callback video sinks
@@ -783,6 +819,29 @@ Napi::Value SignalVideoOutputSinkReady(Info info)
 {
     VideoSinks::Get().SignalReady(ToStr(Arg(info, 0)));
     return info.Env().Undefined();
+}
+
+// Vesktop extensions for the stream audio choice: the apps that play audio, the app of a window (Windows; Linux
+// returns null and Vesktop's main process lists PipeWire's clients)
+Napi::Value VesktopListAudioApps(Info info)
+{
+#ifdef _WIN32
+    return FromJson(info.Env(), ListAudioApps());
+#else
+    return info.Env().Null();
+#endif
+}
+
+Napi::Value VesktopWindowAudioApp(Info info)
+{
+#ifdef _WIN32
+    if (!Arg(info, 0).IsNumber() && !Arg(info, 0).IsString()) return info.Env().Null();
+    int64_t window = Arg(info, 0).IsNumber() ? Arg(info, 0).As<Napi::Number>().Int64Value()
+                                             : std::strtoll(Arg(info, 0).As<Napi::String>().Utf8Value().c_str(), nullptr, 10);
+    return FromJson(info.Env(), WindowAudioApp(window));
+#else
+    return info.Env().Null();
+#endif
 }
 
 Napi::Value VesktopVoiceInfo(Info info)
@@ -906,8 +965,8 @@ Napi::Object Init(Napi::Env env, Napi::Object exports)
     fn("setNativeScreenSharePickerCallbacks", SetNativeScreenSharePickerCallbacks);
     fn("releaseNativeDesktopVideoSourcePickerStream", ReleaseNativeDesktopVideoSourcePickerStream);
     fn("setNativeDesktopVideoSourcePickerActive", Stub);
-    fn("getScreenPreviews", GetPreviews);
-    fn("getWindowPreviews", GetPreviews);
+    fn("getScreenPreviews", GetScreenPreviews);
+    fn("getWindowPreviews", GetWindowPreviews);
     fn("setPreviewsUseWgc", Stub);
     fn("saveScreenshot", SaveScreenshot);
 
@@ -930,6 +989,8 @@ Napi::Object Init(Napi::Env env, Napi::Object exports)
 
     // not part of the API Discord uses: what this build supports (index.js declares features from it)
     fn("vesktopVoiceInfo", VesktopVoiceInfo);
+    fn("vesktopListAudioApps", VesktopListAudioApps);
+    fn("vesktopWindowAudioApp", VesktopWindowAudioApp);
     return exports;
 }
 

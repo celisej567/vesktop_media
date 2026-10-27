@@ -15,6 +15,7 @@ building, running and testing in short; these pages explain the design.
 | [08 Vesktop integration](08-vesktop.md) | loading the module, the `DiscordNative` shim, the patches, the Go Live flow, the extensions, the noise suppression setting and the call panel button |
 | [09 Diagnostics and tests](09-diagnostics.md) | the log and how to read it, the fake SFU and `scripts/test.sh` |
 | [10 Open problems](10-open-problems.md) | what is not solved or not verified yet |
+| [11 Windows](11-windows.md) | the Windows build (clang-cl, Node-API import library), libraries, Core Audio, process loopback soundshare, screen and window capture, cameras, tests |
 
 ## In one paragraph
 
@@ -24,7 +25,8 @@ native module, written from scratch on top of libwebrtc's low-level `webrtc::Cal
 JavaScript API that Discord's code expects from a native media engine (99 engine functions, `VoiceConnection` with
 66 methods), so Discord's own voice, video and Go Live code runs unchanged; Vesktop loads the module and patches
 places of the web client (and uses a few extensions of ours: camera options, encoder choice, noise models). On Linux it captures screens through xdg-desktop-portal and PipeWire, cameras through
-V4L2, stream audio through PulseAudio, encodes VP8 with libvpx and H.264 / H.265 with our own FFmpeg (NVIDIA NVENC
+V4L2, stream audio through PulseAudio (on Windows: libwebrtc's desktop capturers, DirectShow, WASAPI process loopback,
+see [11](11-windows.md)), encodes VP8 with libvpx and H.264 / H.265 with our own FFmpeg (NVIDIA NVENC
 or the CPU), cleans the microphone with libwebrtc's suppression, RNNoise or DeepFilterNet, and talks UDP to Discord's media servers (SFU) with transport encryption and DAVE end-to-end
 encryption.
 

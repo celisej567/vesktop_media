@@ -92,43 +92,66 @@ const Api* ApiFor(const char* decoder)
         auto in = [](void* lib) { return [lib](const char* name) { return LibrarySymbol(lib, name); }; };
         // ours first (scripts/build-ffmpeg.sh, next to the module): H.264 and H.265 without the system's FFmpeg.
         // One library with -Bsymbolic, loaded without isolation (malloc / free stay the process')
-        if (void* h = OpenLibrary({"libvesktop_ffmpeg.so"}, false)) {
+        if (void* h = OpenLibrary({VV_LOCAL_LIBRARY("ffmpeg")}, false)) {
             Api a;
-            a.source = "bundled libvesktop_ffmpeg";
+            a.source = "bundled " VV_LOCAL_LIBRARY("ffmpeg");
             if (a.Load(in(h), in(h))) {
                 log(a);
                 list.push_back(a);
             }
-        }
-        Api host;
-        host.source = "host libffmpeg";
-        if (host.Load(HostSymbol, HostSymbol)) {
-            log(host);
-            list.push_back(host);
         }
         auto covered = [&](const char* decoder) {
             for (auto& a : list)
                 if (a.Has(decoder)) return true;
             return false;
         };
-        // A system FFmpeg only for what the host lacks (Electron's libffmpeg has H.264 but no HEVC):
-        // the newest one that loads, FFmpeg 9 … 4.4 (the struct prefixes above are the same in all)
-        for (int v : {63, 62, 61, 60, 59, 58}) {
-            if (covered(kH264) && covered(kHevc)) break;
-            auto codec = "libavcodec.so." + std::to_string(v);
-            void* h = OpenLibrary({codec.c_str()}, true);
-            if (!h) continue;
-            // libavutil is a dependency of libavcodec and already loaded with it (avutil major = avcodec major - 2)
-            void* util = LoadedLibrary(("libavutil.so." + std::to_string(v - 2)).c_str());
-            Api a;
-            a.source = codec;
-            if (util && a.Load(in(h), in(util))) {
-                log(a);
-                list.push_back(a);
-                break;
+        // A versioned FFmpeg, the newest that loads, FFmpeg 9 … 4.4 (the struct prefixes above are the same in all).
+        // Linux: the system's, only for what the host lacks (Electron's libffmpeg has H.264 but no HEVC). Windows: the
+        // DLLs shipped next to the module (scripts/build-ffmpeg.ps1, never one from PATH), ours, so ahead of the host's
+        auto versioned = [&] {
+            for (int v : {63, 62, 61, 60, 59, 58}) {
+                if (covered(kH264) && covered(kHevc)) break;
+#ifdef _WIN32
+                auto codec = "avcodec-" + std::to_string(v) + ".dll";
+                void* h = OpenLocalLibrary(codec.c_str());
+                auto utilName = "avutil-" + std::to_string(v - 2) + ".dll";
+#else
+                auto codec = "libavcodec.so." + std::to_string(v);
+                void* h = OpenLibrary({codec.c_str()}, true);
+                auto utilName = "libavutil.so." + std::to_string(v - 2);
+#endif
+                if (!h) continue;
+                // libavutil is a dependency of libavcodec and already loaded with it (avutil major = avcodec major - 2)
+                void* util = LoadedLibrary(utilName.c_str());
+                Api a;
+                a.source = codec;
+                if (util && a.Load(in(h), in(util))) {
+                    log(a);
+                    list.push_back(a);
+                    break;
+                }
+                CloseLibrary(h);
             }
-            CloseLibrary(h);
+        };
+#ifdef _WIN32
+        versioned();
+#endif
+        Api host;
+#ifdef _WIN32
+        // Electron's FFmpeg is its own DLL on Windows, next to the executable
+        host.source = "host ffmpeg.dll";
+        void* hostLib = LoadedLibrary("ffmpeg.dll");
+        if (hostLib && host.Load(in(hostLib), in(hostLib))) {
+#else
+        host.source = "host libffmpeg";
+        if (host.Load(HostSymbol, HostSymbol)) {
+#endif
+            log(host);
+            list.push_back(host);
         }
+#ifndef _WIN32
+        versioned();
+#endif
         if (!covered(kHevc)) VV_LOGI("video", "no FFmpeg with an HEVC decoder: H.265 is not offered");
         if (!covered(kH264)) VV_LOGW("video", "no FFmpeg with an H.264 decoder: H.264 is not offered");
         return list;

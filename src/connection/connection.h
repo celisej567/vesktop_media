@@ -42,7 +42,7 @@ class MediaTransport;
 class RemoteVideoSink;
 class DecoderFactory;
 class FrameSource;
-class PipeWireCapturer;
+class ScreenCapturer;
 class VideoFrameEncryptor;
 
 // Speaking flags (gateway SPEAKING)
@@ -268,7 +268,7 @@ private:
     // desktop source (JS thread + worker, under desktopMutex_)
     std::mutex desktopMutex_;
     webrtc::scoped_refptr<FrameSource> desktopSource_;
-    std::unique_ptr<PipeWireCapturer> desktopCapturer_;
+    std::unique_ptr<ScreenCapturer> desktopCapturer_;
 
     mutable std::mutex usersMutex_;
     std::map<std::string, RemoteUser> users_;

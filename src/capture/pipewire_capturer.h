@@ -12,19 +12,20 @@
 #include <thread>
 
 #include "capture/portal.h"
+#include "capture/screen_capturer.h"
 #include "video/frame_source.h"
 
 namespace vv {
 
-class PipeWireCapturer {
+class PipeWireCapturer : public ScreenCapturer {
 public:
     // `ended(reason)` runs once when the stream stops on its own (session closed, node removed, error)
     PipeWireCapturer(PickedSource source, webrtc::scoped_refptr<FrameSource> sink, std::function<void(const std::string&)> ended);
-    ~PipeWireCapturer();
+    ~PipeWireCapturer() override;
     bool Start();
     // Replaces the callback; runs it right away when the capture already ended
-    void SetEnded(std::function<void(const std::string&)> ended);
-    uint64_t Frames() const { return frames_; }
+    void SetEnded(std::function<void(const std::string&)> ended) override;
+    uint64_t Frames() const override { return frames_; }
     // The application of a picked window, when the compositor names it: KWin calls a window's stream
     // "kwin-screencast-<desktop file name>" (eg. "org.mozilla.firefox", "steam_app_4000"). "" if unknown
     std::string SourceAppId() const;

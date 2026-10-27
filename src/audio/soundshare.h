@@ -75,8 +75,8 @@ private:
     std::mutex mutex_; // pid_ / device_ / start-up
     std::atomic<uint32_t> pid_{0};
     std::string device_;
-    bool failed_ = false;
-    bool attached_ = false; // loop thread
+    std::atomic<bool> failed_{false};
+    std::atomic<bool> attached_{false}; // loop thread (capture threads on Windows)
 
     pa_threaded_mainloop* loop_ = nullptr;
     pa_context* context_ = nullptr;

@@ -25,9 +25,9 @@ const Api* GetApi()
     static Api api = [] {
         Api a;
         std::string path;
-        void* h = OpenLocalLibrary("libvesktop_deepfilter.so", &path);
+        void* h = OpenLocalLibrary(VV_LOCAL_LIBRARY("deepfilter"), &path);
         if (!h) {
-            VV_LOGW("deepfilter", "libvesktop_deepfilter.so not found next to the module");
+            VV_LOGW("deepfilter", VV_LOCAL_LIBRARY("deepfilter") " not found next to the module");
             return a;
         }
         a.create = reinterpret_cast<void* (*)(const char*, float)>(LibrarySymbol(h, "df_create"));
