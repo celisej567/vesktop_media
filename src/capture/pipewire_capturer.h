@@ -1,5 +1,6 @@
-// Screen / window capture from a portal PipeWire node. Frames arrive in shared memory
-// (no DMA-BUF import), are converted to I420 and pushed into a FrameSource.
+// Screen / window capture from a portal PipeWire node. Frames arrive in GPU memory (EglDmaBuf, explicit sync when
+// both sides have it; VESKTOP_MEDIA_PIPEWIRE_DMABUF=0 turns it off) or in shared memory, are converted to I420 and
+// pushed into a FrameSource.
 #pragma once
 
 #include <api/scoped_refptr.h>

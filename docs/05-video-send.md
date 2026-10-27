@@ -155,9 +155,10 @@ denoising.
 * it drops frames above the requested rate;
 * a screen source repeats its last frame when no new one arrived within a frame interval of the output rate: a
   compositor sends frames only when something changed, and NVENC and x265 share the bitrate out per configured frame,
-  so a few frames a second would get a fraction of the bitrate. Repeats carry the capture's clock (the last frame's
-  timestamp plus the time since), not ours: PipeWire's timestamps are capture times, behind ours;
-* the timestamps it hands on strictly increase by at least 1 ms (the capture thread and the repeater deliver one
-  after the other): libwebrtc drops a frame whose timestamp in ms is not after the previous one's;
+  so a few frames a second would get a fraction of the bitrate. Repeats carry the capturer's clock (the last frame's
+  timestamp plus the time since);
+* the capture thread and the repeater deliver one after the other, and the timestamps handed on strictly increase by
+  at least 1 ms: libwebrtc drops a frame whose timestamp in ms is not after the previous one's, and a captured frame
+  stamped just before a repeat could otherwise reach the encoder just after it;
 * it also hands every (unscaled) frame to the JS preview sink of its stream id: the camera preview in the settings,
   the preview of one's own stream, or both for a camera streamed with Go Live.

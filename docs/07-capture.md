@@ -58,10 +58,52 @@ application, so `appId` is empty there.
   `VESKTOP_MEDIA_PIPEWIRE_NODE`);
 * lists the registry once, learns the picked node's `object.serial` and links by it (`target.object`; linking by node
   id is the fallback), and binds the node to log the formats it offers;
-* asks for raw video, BGRx / RGBx / BGRA / RGBA, any size up to 16384², up to 240 fps, and **shared memory
-  buffers** (`MemPtr` / `MemFd`). DMA-BUF is not imported: the frames are converted on the CPU anyway;
+* asks for raw video, BGRx / RGBx / BGRA / RGBA, any size up to 16384², up to 240 fps, in **shared memory
+  buffers** (`MemPtr` / `MemFd`), and before that as DMA-BUF (below; `VESKTOP_MEDIA_PIPEWIRE_DMABUF=0` leaves it
+  out);
 * on each `process` callback drains the queue and keeps only the newest buffer (a slow consumer skips frames rather
   than falling behind), skips corrupted buffers, converts to I420 and pushes into the frame source.
+
+### DMA-BUF
+
+With shared memory the compositor copies every frame from the GPU into the buffer itself, in its own thread
+(KWin: a read back after rendering). With DMA-BUF it only renders into a GPU buffer and the copy is ours
+(`capture/egl_dmabuf.cc`):
+
+* an EGL display of the GPU without a window system: `EGL_EXT_platform_device` (the first device with a DRM render
+  node), else Mesa's surfaceless platform; an OpenGL ES 2 context without a surface. libEGL is loaded at runtime;
+* each RGB format is offered as DMA-BUF with every modifier the GPU imports (`eglQueryDmaBufModifiersEXT`, flag
+  `DONT_FIXATE`: the compositor, which allocates, picks one), then the shared memory format as before;
+* a frame is imported as an external texture (`samplerExternalOES`: any importable modifier, compressed ones and
+  multi-plane layouts included), drawn by a shader into packed I420 and only the three planes are read back,
+  straight into the I420 buffer: 1.5 bytes a pixel instead of 4, and no conversion on the CPU. The arithmetic is the
+  CPU path's (`video/rgb_to_i420.h`), exact in highp floats: both paths give the same bytes;
+* an imported image is kept per buffer (the compositor cycles through a few) and dropped when the stream removes it;
+* any failure (no EGL, no import, a GL error) falls back to shared memory for the rest of the capture.
+
+**Explicit sync.** When the DRM node has timeline sync objects (`DRM_CAP_SYNCOBJ_TIMELINE`), the buffer layout with
+`SPA_META_SyncTimeline` is asked for first (mandatory `metaType`), the plain one after it. The compositor then
+attaches an acquire point to each frame (signalled when its rendering is done) and a release point (when it may
+reuse the buffer); the sync objects are the buffer's last two datas. Before reading, the module waits for the
+acquire point (`DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT`, at most 100 ms); every buffer it gives back, read or skipped,
+gets its release point signalled, or the compositor would run out of buffers. Plain ioctls on the render node: no
+libdrm. Without it KWin finishes rendering before it queues a buffer on NVIDIA (`glFinish`, implicit sync does not
+work there) and relies on implicit sync elsewhere; other compositors may not have that workaround.
+`VESKTOP_MEDIA_PIPEWIRE_EXPLICIT_SYNC=0` leaves it out (comparisons).
+
+`VESKTOP_MEDIA_PIPEWIRE_DUMP=<file>` writes the 60th converted frame as raw I420, to compare the two paths. Every 5 s
+the log has the frames the compositor sent, the conversion time and the largest gap between frames.
+
+Measured on KWin 6.7.5, NVIDIA RTX 2080, a 1080p60 clip fullscreen on a 60 Hz output, three alternating rounds of 25 s
+each (rounds within a few percent of each other); a still frame read both ways gave the same bytes:
+
+| | shared memory | DMA-BUF | DMA-BUF, explicit sync |
+|---|---|---|---|
+| frames from KWin | 51.7 / s | 58.1 / s | 58.4 / s |
+| reading a frame (module) | 3.6 ms | 2.1 ms | 2.2 ms |
+| KWin CPU | 18.8 % | 6.7 % | 6.2 % |
+| module CPU (whole test process) | 51.5 % | 44.3 % | 44.4 % |
+| GPU | 12.8 % | 10.0 % | 10.1 % |
 
 ### The frame repeater
 

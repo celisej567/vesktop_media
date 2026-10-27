@@ -13,11 +13,15 @@
 #include <libyuv/convert.h>
 #include <rtc_base/time_utils.h>
 
+#include <drm/drm_fourcc.h>
 #include <unistd.h>
 
 #include <chrono>
+#include <cstdlib>
+#include <vector>
 
 #include "common/log.h"
+#include "capture/egl_dmabuf.h"
 #include "common/platform.h"
 #include "video/rgb_to_i420.h"
 
@@ -143,6 +147,92 @@ std::string DumpPod(const spa_pod* pod, int depth = 0)
     }
 }
 
+// The packed RGB formats a screen comes in, as PipeWire names them and as DRM (DMA-BUF) does
+struct RgbFormat {
+    spa_video_format spa;
+    uint32_t drm;
+};
+constexpr RgbFormat kRgbFormats[] = {{SPA_VIDEO_FORMAT_BGRx, DRM_FORMAT_XRGB8888},
+                                     {SPA_VIDEO_FORMAT_BGRA, DRM_FORMAT_ARGB8888},
+                                     {SPA_VIDEO_FORMAT_RGBx, DRM_FORMAT_XBGR8888},
+                                     {SPA_VIDEO_FORMAT_RGBA, DRM_FORMAT_ABGR8888}};
+
+std::string Hex(uint64_t v)
+{
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%llx", static_cast<unsigned long long>(v));
+    return buf;
+}
+
+uint32_t DrmFormat(uint32_t spaFormat)
+{
+    for (auto& f : kRgbFormats)
+        if (f.spa == spaFormat) return f.drm;
+    return 0;
+}
+
+// Frames in GPU memory (EglDmaBuf) unless VESKTOP_MEDIA_PIPEWIRE_DMABUF=0; shared memory when that fails
+bool DmaBufWanted()
+{
+    const char* v = getenv("VESKTOP_MEDIA_PIPEWIRE_DMABUF");
+    return !v || strcmp(v, "0") != 0;
+}
+
+// The explicit sync timeline of a buffer, when it was negotiated: the metadata and the acquire / release sync object
+// fds (the buffer's last two datas)
+struct SyncTimeline {
+    spa_meta_sync_timeline* meta = nullptr;
+    int acquireFd = -1, releaseFd = -1;
+};
+
+SyncTimeline FindSyncTimeline(spa_buffer* buffer)
+{
+    SyncTimeline t;
+    if (!buffer || buffer->n_datas < 3) return t;
+    auto* meta = static_cast<spa_meta_sync_timeline*>(spa_buffer_find_meta_data(buffer, SPA_META_SyncTimeline, sizeof(spa_meta_sync_timeline)));
+    auto& acquire = buffer->datas[buffer->n_datas - 2];
+    auto& release = buffer->datas[buffer->n_datas - 1];
+    if (!meta || acquire.type != SPA_DATA_SyncObj || release.type != SPA_DATA_SyncObj) return t;
+    t.meta = meta;
+    t.acquireFd = static_cast<int>(acquire.fd);
+    t.releaseFd = static_cast<int>(release.fd);
+    return t;
+}
+
+// What we accept: with `egl`, each RGB format as a DMA-BUF with the modifiers the GPU imports (the compositor, which
+// allocates, picks one: DONT_FIXATE), then any of them in shared memory
+std::vector<const spa_pod*> BuildFormats(spa_pod_builder* b, const EglDmaBuf* egl)
+{
+    spa_rectangle defSize = {1920, 1080}, minSize = {1, 1}, maxSize = {16384, 16384};
+    spa_fraction defRate = {60, 1}, minRate = {0, 1}, maxRate = {240, 1};
+    std::vector<const spa_pod*> params;
+    if (egl) {
+        for (auto& f : kRgbFormats) {
+            auto mods = egl->Modifiers(f.drm);
+            spa_pod_frame frame, choice;
+            spa_pod_builder_push_object(b, &frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+            spa_pod_builder_add(b, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video), SPA_FORMAT_mediaSubtype,
+                                SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format, SPA_POD_Id(f.spa), SPA_FORMAT_VIDEO_size,
+                                SPA_POD_CHOICE_RANGE_Rectangle(&defSize, &minSize, &maxSize), SPA_FORMAT_VIDEO_framerate,
+                                SPA_POD_CHOICE_RANGE_Fraction(&defRate, &minRate, &maxRate), 0);
+            spa_pod_builder_prop(b, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE);
+            spa_pod_builder_push_choice(b, &choice, SPA_CHOICE_Enum, 0);
+            spa_pod_builder_long(b, static_cast<int64_t>(mods[0])); // the default
+            for (uint64_t m : mods) spa_pod_builder_long(b, static_cast<int64_t>(m));
+            spa_pod_builder_pop(b, &choice);
+            params.push_back(static_cast<const spa_pod*>(spa_pod_builder_pop(b, &frame)));
+        }
+    }
+    params.push_back(static_cast<const spa_pod*>(spa_pod_builder_add_object(
+        b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
+        SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_BGRA,
+                               SPA_VIDEO_FORMAT_RGBA),
+        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&defSize, &minSize, &maxSize), SPA_FORMAT_VIDEO_framerate,
+        SPA_POD_CHOICE_RANGE_Fraction(&defRate, &minRate, &maxRate))));
+    return params;
+}
+
 } // namespace
 
 struct PipeWireCapturer::Impl {
@@ -161,6 +251,19 @@ struct PipeWireCapturer::Impl {
     spa_hook listener{};
     spa_video_info_raw format{};
     bool streaming = false;
+    // DMA-BUF (VESKTOP_MEDIA_PIPEWIRE_DMABUF): the reader, whether the negotiated format is a DMA-BUF one, and
+    // whether reading one failed (back to shared memory for good)
+    std::unique_ptr<EglDmaBuf> egl;
+    bool dmabufFormat = false;
+    bool dmabufFailed = false;
+    bool explicitSync = false; // buffers come with a SyncTimeline
+    // what the compositor sent in the last 5 s (pipewire thread)
+    int64_t statsStartUs = 0;
+    int statsBuffers = 0, statsConverted = 0;
+    int64_t statsConvertUs = 0, statsConvertMaxUs = 0;
+    uint64_t statsLastPts = 0;
+    int64_t statsIntervalSumUs = 0, statsIntervalMaxUs = 0;
+    int statsIntervals = 0;
 
     // what the source offers (logged once): the answer to "no more input formats"
     pw_registry* registry = nullptr;
@@ -270,6 +373,22 @@ struct PipeWireCapturer::Impl {
         if (cb) cb(reason);
     }
 
+    // VESKTOP_MEDIA_PIPEWIRE_DUMP=<file>: the 60th converted frame goes there as raw I420 (comparing the shared memory
+    // and DMA-BUF paths)
+    int dumpCountdown = 60;
+    void MaybeDump(const webrtc::I420Buffer& b)
+    {
+        const char* path = getenv("VESKTOP_MEDIA_PIPEWIRE_DUMP");
+        if (!path || dumpCountdown <= 0 || --dumpCountdown > 0) return;
+        FILE* f = fopen(path, "wb");
+        if (!f) return;
+        for (int y = 0; y < b.height(); y++) fwrite(b.DataY() + y * b.StrideY(), 1, b.width(), f);
+        for (int y = 0; y < b.ChromaHeight(); y++) fwrite(b.DataU() + y * b.StrideU(), 1, b.ChromaWidth(), f);
+        for (int y = 0; y < b.ChromaHeight(); y++) fwrite(b.DataV() + y * b.StrideV(), 1, b.ChromaWidth(), f);
+        fclose(f);
+        VV_LOGI("pipewire", "frame dumped to %s (%dx%d I420)", path, b.width(), b.height());
+    }
+
     void Push(webrtc::scoped_refptr<webrtc::I420Buffer> buffer)
     {
         int64_t now = webrtc::TimeMicros();
@@ -298,20 +417,40 @@ struct PipeWireCapturer::Impl {
             mediaSubtype != SPA_MEDIA_SUBTYPE_raw)
             return;
         spa_format_video_raw_parse(param, &self->format);
-        VV_LOGI("pipewire", "format: %ux%u, video format %u, %u/%u fps", self->format.size.width, self->format.size.height,
-                self->format.format, self->format.framerate.num, self->format.framerate.denom);
+        self->dmabufFormat = spa_pod_find_prop(param, nullptr, SPA_FORMAT_VIDEO_modifier) != nullptr;
+        VV_LOGI("pipewire", "format: %ux%u, video format %u, %u/%u fps, max %u/%u, %s", self->format.size.width,
+                self->format.size.height, self->format.format, self->format.framerate.num, self->format.framerate.denom,
+                self->format.max_framerate.num, self->format.max_framerate.denom,
+                self->dmabufFormat ? ("DMA-BUF modifier 0x" + Hex(self->format.modifier)).c_str() : "shared memory");
 
-        // shared memory buffers only: no DMA-BUF import
         uint8_t buf[1024];
         spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
-        const spa_pod* params[2];
-        params[0] = static_cast<const spa_pod*>(spa_pod_builder_add_object(
+        const spa_pod* params[5];
+        uint32_t n = 0;
+        // Explicit sync first (the producer signals when a frame is rendered, we signal when we are done with it:
+        // nobody waits for the GPU), required by its buffer layout (mandatory metaType); the plain layout after it
+        // (VESKTOP_MEDIA_PIPEWIRE_EXPLICIT_SYNC=0 leaves it out, for comparisons)
+        const char* es = getenv("VESKTOP_MEDIA_PIPEWIRE_EXPLICIT_SYNC");
+        if (self->dmabufFormat && self->egl && !(es && strcmp(es, "0") == 0) && self->egl->ExplicitSync()) {
+            spa_pod_frame f;
+            spa_pod_builder_push_object(&b, &f, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers);
+            spa_pod_builder_add(&b, SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(8, 2, 16), SPA_PARAM_BUFFERS_dataType,
+                                SPA_POD_CHOICE_FLAGS_Int(1 << SPA_DATA_DmaBuf), 0);
+            spa_pod_builder_prop(&b, SPA_PARAM_BUFFERS_metaType, SPA_POD_PROP_FLAG_MANDATORY);
+            spa_pod_builder_int(&b, 1 << SPA_META_SyncTimeline);
+            params[n++] = static_cast<const spa_pod*>(spa_pod_builder_pop(&b, &f));
+            params[n++] = static_cast<const spa_pod*>(spa_pod_builder_add_object(
+                &b, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta, SPA_PARAM_META_type, SPA_POD_Id(SPA_META_SyncTimeline),
+                SPA_PARAM_META_size, SPA_POD_Int(sizeof(spa_meta_sync_timeline))));
+        }
+        params[n++] = static_cast<const spa_pod*>(spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(8, 2, 16),
-            SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_MemFd))));
-        params[1] = static_cast<const spa_pod*>(spa_pod_builder_add_object(
+            SPA_PARAM_BUFFERS_dataType,
+            SPA_POD_CHOICE_FLAGS_Int(self->dmabufFormat ? (1 << SPA_DATA_DmaBuf) : ((1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_MemFd)))));
+        params[n++] = static_cast<const spa_pod*>(spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta, SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
             SPA_PARAM_META_size, SPA_POD_Int(sizeof(spa_meta_header))));
-        Pw()->pw_stream_update_params(self->stream, params, 2);
+        Pw()->pw_stream_update_params(self->stream, params, n);
     }
 
     static void OnProcess(void* data)
@@ -321,22 +460,108 @@ struct PipeWireCapturer::Impl {
         pw_buffer* newest = nullptr;
         // drain the queue, keep only the latest frame
         while (pw_buffer* b = pw->pw_stream_dequeue_buffer(self->stream)) {
-            if (newest) pw->pw_stream_queue_buffer(self->stream, newest);
+            if (newest) self->Return(newest);
             newest = b;
         }
         if (!newest) return;
         self->Convert(newest->buffer);
-        pw->pw_stream_queue_buffer(self->stream, newest);
+        self->Return(newest);
+    }
+
+    // Every buffer goes back with its release point signalled (explicit sync), read or not: the producer reuses a
+    // buffer only after that
+    void Return(pw_buffer* b)
+    {
+        auto sync = FindSyncTimeline(b->buffer);
+        if (sync.meta && egl) egl->SignalRelease(sync.releaseFd, sync.meta->release_point);
+        Pw()->pw_stream_queue_buffer(stream, b);
+    }
+
+    static void OnRemoveBuffer(void* data, pw_buffer* buffer)
+    {
+        auto* self = static_cast<Impl*>(data);
+        if (!self->egl || !buffer || !buffer->buffer) return;
+        for (uint32_t i = 0; i < buffer->buffer->n_datas; i++) {
+            auto& d = buffer->buffer->datas[i];
+            if ((i == 0 && d.type == SPA_DATA_DmaBuf) || d.type == SPA_DATA_SyncObj) self->egl->Forget(static_cast<int>(d.fd));
+        }
+    }
+
+    // Reading a DMA-BUF failed: offer shared memory only from now on
+    void FallBackToSharedMemory()
+    {
+        dmabufFailed = true;
+        VV_LOGW("pipewire", "DMA-BUF frames cannot be read, back to shared memory");
+        uint8_t buf[1024];
+        spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+        auto params = BuildFormats(&b, nullptr);
+        Pw()->pw_stream_update_params(stream, params.data(), static_cast<uint32_t>(params.size()));
+    }
+
+    void CountFrame(spa_buffer* buffer, bool converted, int64_t convertUs)
+    {
+        int64_t now = webrtc::TimeMicros();
+        if (!statsStartUs) statsStartUs = now;
+        statsBuffers++;
+        if (converted) {
+            statsConverted++;
+            statsConvertUs += convertUs;
+            statsConvertMaxUs = std::max(statsConvertMaxUs, convertUs);
+        }
+        auto* header = static_cast<spa_meta_header*>(spa_buffer_find_meta_data(buffer, SPA_META_Header, sizeof(spa_meta_header)));
+        if (header && header->pts > 0) {
+            if (statsLastPts && static_cast<uint64_t>(header->pts) > statsLastPts) {
+                int64_t interval = static_cast<int64_t>((static_cast<uint64_t>(header->pts) - statsLastPts) / 1000);
+                statsIntervalSumUs += interval;
+                statsIntervalMaxUs = std::max(statsIntervalMaxUs, interval);
+                statsIntervals++;
+            }
+            statsLastPts = static_cast<uint64_t>(header->pts);
+        }
+        if (now - statsStartUs < 5'000'000) return;
+        VV_LOGI("pipewire", "last 5 s: %d frames from the compositor (%s), %d converted in %lld us on average (max %lld), "
+                            "frame interval %.1f ms on average (max %.1f)",
+                statsBuffers, dmabufFormat ? (explicitSync ? "DMA-BUF, explicit sync" : "DMA-BUF") : "shared memory", statsConverted,
+                static_cast<long long>(statsConverted ? statsConvertUs / statsConverted : 0), static_cast<long long>(statsConvertMaxUs),
+                statsIntervals ? statsIntervalSumUs / 1000.0 / statsIntervals : 0.0, statsIntervalMaxUs / 1000.0);
+        statsStartUs = now;
+        statsBuffers = statsConverted = statsIntervals = 0;
+        statsConvertUs = statsConvertMaxUs = statsIntervalSumUs = statsIntervalMaxUs = 0;
     }
 
     void Convert(spa_buffer* buffer)
     {
         if (!buffer || buffer->n_datas < 1) return;
         auto& d = buffer->datas[0];
-        if (!d.data || !d.chunk || d.chunk->size == 0 || (d.chunk->flags & SPA_CHUNK_FLAG_CORRUPTED)) return;
         auto* header = static_cast<spa_meta_header*>(spa_buffer_find_meta_data(buffer, SPA_META_Header, sizeof(spa_meta_header)));
         if (header && (header->flags & SPA_META_HEADER_FLAG_CORRUPTED)) return;
+        if (!d.chunk || (d.chunk->flags & SPA_CHUNK_FLAG_CORRUPTED)) return;
         int width = static_cast<int>(format.size.width), height = static_cast<int>(format.size.height);
+        int64_t t0 = webrtc::TimeMicros();
+        if (d.type == SPA_DATA_DmaBuf) {
+            // the planes are the leading DMA-BUF datas (explicit sync would add its sync objects after them)
+            std::vector<EglDmaBuf::Plane> planes;
+            for (uint32_t i = 0; i < buffer->n_datas && buffer->datas[i].type == SPA_DATA_DmaBuf; i++)
+                planes.push_back({static_cast<int>(buffer->datas[i].fd), buffer->datas[i].chunk->offset,
+                                  static_cast<uint32_t>(buffer->datas[i].chunk->stride)});
+            auto sync = FindSyncTimeline(buffer);
+            if (sync.meta && !explicitSync) {
+                explicitSync = true;
+                VV_LOGI("pipewire", "explicit sync in use");
+            }
+            // with explicit sync the frame may still be rendering: wait for the producer's acquire point
+            if (sync.meta && egl && !egl->WaitAcquire(sync.acquireFd, sync.meta->acquire_point)) return;
+            auto i420 = egl && !dmabufFailed ? egl->ReadI420(DrmFormat(format.format), format.modifier, width, height, planes) : nullptr;
+            CountFrame(buffer, i420 != nullptr, webrtc::TimeMicros() - t0);
+            if (i420) {
+                MaybeDump(*i420);
+                Push(i420);
+            } else if (!dmabufFailed) {
+                FallBackToSharedMemory();
+            }
+            return;
+        }
+        if (!d.data || d.chunk->size == 0) return;
         int stride = d.chunk->stride > 0 ? d.chunk->stride : width * 4;
         if (width <= 0 || height <= 0 || static_cast<size_t>(stride) * height > d.maxsize) return;
         auto* src = static_cast<const uint8_t*>(d.data) + d.chunk->offset;
@@ -355,7 +580,10 @@ struct PipeWireCapturer::Impl {
         default:
             break;
         }
-        if (ok) Push(i420);
+        CountFrame(buffer, ok, webrtc::TimeMicros() - t0);
+        if (!ok) return;
+        MaybeDump(*i420);
+        Push(i420);
     }
 };
 
@@ -428,24 +656,24 @@ bool PipeWireCapturer::Start()
         e.state_changed = &Impl::OnStateChanged;
         e.param_changed = &Impl::OnParamChanged;
         e.process = &Impl::OnProcess;
+        e.remove_buffer = &Impl::OnRemoveBuffer;
         return e;
     }();
     pw->pw_stream_add_listener(m.stream, &m.listener, &events, &m);
 
-    uint8_t buf[1024];
+    if (DmaBufWanted()) {
+        m.egl = std::make_unique<EglDmaBuf>();
+        if (!m.egl->Init()) {
+            VV_LOGW("pipewire", "DMA-BUF import not available, shared memory");
+            m.egl.reset();
+        }
+    }
+    uint8_t buf[8192];
     spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
-    spa_rectangle defSize = {1920, 1080}, minSize = {1, 1}, maxSize = {16384, 16384};
-    spa_fraction defRate = {60, 1}, minRate = {0, 1}, maxRate = {240, 1};
-    const spa_pod* params[1];
-    params[0] = static_cast<const spa_pod*>(spa_pod_builder_add_object(
-        &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_BGRA,
-                               SPA_VIDEO_FORMAT_RGBA),
-        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&defSize, &minSize, &maxSize), SPA_FORMAT_VIDEO_framerate,
-        SPA_POD_CHOICE_RANGE_Fraction(&defRate, &minRate, &maxRate)));
+    auto params = BuildFormats(&b, m.egl.get());
     int rc = pw->pw_stream_connect(m.stream, PW_DIRECTION_INPUT, targetId,
-                                   static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
+                                   static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
+                                   params.data(), static_cast<uint32_t>(params.size()));
     pw->pw_thread_loop_unlock(m.loop);
     if (rc < 0) {
         VV_LOGE("pipewire", "pw_stream_connect failed (%d)", rc);
@@ -465,7 +693,7 @@ bool PipeWireCapturer::Start()
             m.Push(last);
         }
     });
-    VV_LOGI("pipewire", "capturing node %u", m.source.nodeId);
+    VV_LOGI("pipewire", "capturing node %u%s", m.source.nodeId, m.egl ? ", DMA-BUF offered" : "");
     return true;
 }
 
@@ -513,6 +741,15 @@ PipeWireCapturer::~PipeWireCapturer()
     m.running = false;
     if (m.repeater.joinable()) m.repeater.join();
     if (!pw) return;
+    // the EGL context is current on the loop's thread: release it there (no lock held: the loop runs the call)
+    if (m.egl && m.loop)
+        pw_loop_invoke(
+            pw->pw_thread_loop_get_loop(m.loop),
+            [](spa_loop*, bool, uint32_t, const void*, size_t, void* data) {
+                static_cast<Impl*>(data)->egl->Release();
+                return 0;
+            },
+            0, nullptr, 0, true, &m);
     if (m.loop) pw->pw_thread_loop_stop(m.loop);
     if (m.node) pw->pw_proxy_destroy(reinterpret_cast<pw_proxy*>(m.node));
     if (m.registry) pw->pw_proxy_destroy(reinterpret_cast<pw_proxy*>(m.registry));

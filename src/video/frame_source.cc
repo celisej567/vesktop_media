@@ -38,7 +38,7 @@ void FrameSource::RepeatLoop()
             repeatCv_.wait_for(lock, std::chrono::microseconds(last_ ? due - now : interval));
             continue;
         }
-        // on the capture's clock (PipeWire's are capture times, behind ours): the next captured frame must come after
+        // on the capture's clock (the last frame's timestamp plus the time since), whatever clock a capturer stamps with
         auto frame = *last_;
         lastTimestampUs_ += now - lastUs_;
         frame.set_timestamp_us(lastTimestampUs_);

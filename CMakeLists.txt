@@ -52,6 +52,7 @@ else()
         src/common/platform.cc
         src/audio/soundshare.cc
         src/capture/camera_v4l2.cc
+        src/capture/egl_dmabuf.cc
         src/capture/gio_api.cc
         src/capture/pipewire_capturer.cc
         src/capture/portal.cc)
