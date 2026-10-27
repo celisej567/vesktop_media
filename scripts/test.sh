@@ -70,6 +70,8 @@ echo "== send camera video with 2 simulcast layers (lower layer looped back)"
 check "outbound video|video sink" --seconds 3 --video VP8 --layers 2
 echo "== the selected camera changed during a call: the call sends the new one at once (not when something else changes its video)"
 check "camera switch|outbound video|video sink" --seconds 4 --video VP8 --switch-camera
+echo "== video codec changed during the call: the recreated stream starts its layers again"
+check "codec switch|outbound video" --seconds 4 --video VP8 --switch-codec
 echo "== Go Live with a device (setGoLiveDevices, fake camera)"
 check "outbound video|video sink" --seconds 3 --video VP8 --golive-camera
 

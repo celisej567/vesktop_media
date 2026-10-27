@@ -1,20 +1,28 @@
 // A video source for VideoSendStream (camera or desktop capture). Capturers push frames from any thread;
 // the source scales them to what the encoder asks for (sink wants) and also hands them to the JS preview
 // sink of its stream id, when one is attached.
+//
+// A screen source repeats its last frame when no new one came for a frame interval: compositors send frames only when
+// something changed, and hardware encoders share the bitrate out per frame at the configured rate, so a few frames a
+// second would get a fraction of the bitrate (and a still picture would never sharpen).
 #pragma once
 
 #include <api/video/adapted_video_track_source.h>
 #include <api/video/video_frame.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
 
 namespace vv {
 
 class FrameSource : public webrtc::AdaptedVideoTrackSource {
 public:
-    FrameSource(bool screencast, std::string name) : screencast_(screencast), name_(std::move(name)) {}
+    FrameSource(bool screencast, std::string name);
+    ~FrameSource() override;
 
     void PushFrame(const webrtc::VideoFrame& frame);
     // Stream id whose JS sink gets the (unscaled) frames, "" for none
@@ -35,12 +43,27 @@ public:
     std::optional<bool> needs_denoising() const override { return std::nullopt; }
 
 private:
+    void Deliver(const webrtc::VideoFrame& frame);
+    void RepeatLoop();
+
     const bool screencast_;
     const std::string name_;
     std::mutex previewMutex_;
     std::string previewStreamId_, streamPreviewId_;
     std::atomic<uint64_t> frames_{0};
     std::atomic<int> lastWidth_{0}, lastHeight_{0};
+
+    std::mutex deliverMutex_;      // the capture and the repeat thread deliver one after the other
+    int64_t lastDeliveredUs_ = 0;  // deliverMutex_: timestamps handed to the encoder strictly increase
+
+    std::atomic<int> fps_{30}; // the output frame rate: the repeat interval of a screen source
+    std::mutex repeatMutex_;
+    std::condition_variable repeatCv_;
+    bool stop_ = false;                     // repeatMutex_
+    std::optional<webrtc::VideoFrame> last_; // repeatMutex_
+    int64_t lastUs_ = 0;                     // repeatMutex_: when a frame was last delivered
+    int64_t lastTimestampUs_ = 0;            // repeatMutex_: its timestamp (the capture's clock)
+    std::thread repeater_;
 };
 
 } // namespace vv

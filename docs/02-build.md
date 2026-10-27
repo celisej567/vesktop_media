@@ -57,12 +57,12 @@ no encoders, and system FFmpeg versions vary, so `scripts/build-ffmpeg.sh` build
 * everything static, then linked into **one** shared library `libvesktop_ffmpeg.so` with `-Bsymbolic` and a version
   script that exports only `av_*`, `avcodec_*`, `avutil_*`.
 
-Why it is built this way (each was a crash):
+Why it is built this way (each avoids a crash):
 
 * **One library, `-Bsymbolic`, loaded without `RTLD_DEEPBIND`.** FFmpeg's internal calls must bind to our copy, not
   to Electron's libffmpeg, which exports the same names. Loading separate libraries with `RTLD_DEEPBIND` did that,
   but also made the library's `malloc` / `free` resolve to different allocators (libc's `strdup` through
-  Electron's allocator, the matching `free` through libc's), which crashed. With `-Bsymbolic` FFmpeg's own symbols
+  Electron's allocator, the matching `free` through libc's). With `-Bsymbolic` FFmpeg's own symbols
   bind inside the library while `malloc` / `free` stay the process' for everything.
 * **x264 without `memalign`.** x264 asks `memalign` for 2 MB (huge page) alignment; Chromium's allocator, which is
   Electron's `malloc`, traps on that. The script sets `HAVE_MALLOC_H 0` in x264's `config.h`, so x264 aligns plain
@@ -118,8 +118,8 @@ The scripts do not depend on where the project lives or on the user:
 ## Atomic replacement
 
 `build.sh` and Vesktop's `copyNative` write each native file to a temporary name and `rename` it over the old one.
-Overwriting a `.node` or `.so` in place changes pages a running Vesktop has mapped, which crashed it (SIGBUS /
-SIGSEGV) every time a build ran while Vesktop was open. A rename leaves the old inode to the running process.
+Overwriting a `.node` or `.so` in place changes pages a running Vesktop has mapped (SIGBUS / SIGSEGV); a rename
+leaves the old inode to the running process.
 
 ## Portability
 

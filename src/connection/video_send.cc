@@ -428,12 +428,6 @@ void Connection::UpdateVideoSend()
 {
     if (!call_) return;
     bool stream = context_ == "stream";
-    if (videoBroadcast_ && !videoSendStream_ && streamParameters_.is_array())
-        // JS starts every layer as `active: false` and takes the flag back from our setOnVideoCallback report
-        // (handleVideo), so a new stream has to start with its layers active. The
-        // encoder still stays idle until viewers ask for pixels
-        for (auto& p : streamParameters_)
-            if (Get<std::string>(p, "type", "") == "video") p["active"] = true;
     auto layers = VideoLayers(streamParameters_);
     auto codecName = Get<std::string>(videoEncoder_, "name", "");
     int payloadType = Get(videoEncoder_, "type", 0);
@@ -489,6 +483,14 @@ void Connection::UpdateVideoSend()
     json key = {{"codec", codecName}, {"pt", payloadType}, {"rtx", rtxPayloadType}, {"source", reinterpret_cast<uintptr_t>(source.get())}};
     for (auto& l : layers) key["ssrcs"].push_back({l.ssrc, l.rtxSsrc});
     if (videoSendStream_ && key != videoSendKey_) DestroyVideoSendStream();
+    if (!videoSendStream_) {
+        // JS starts every layer as `active: false` and takes the flag back from our setOnVideoCallback report
+        // (handleVideo), so a new stream, also one recreated for another codec, has to start with its layers
+        // active. The encoder still stays idle until viewers ask for pixels
+        for (auto& p : streamParameters_)
+            if (Get<std::string>(p, "type", "") == "video") p["active"] = true;
+        layers = VideoLayers(streamParameters_);
+    }
 
     // encoder config
     auto& o = videoSendOptions_;
@@ -521,7 +523,10 @@ void Connection::UpdateVideoSend()
     for (auto& p : PlanLayers(layers, o, 1280, 720)) ec.max_bitrate_bps += p.maxBitrate;
     ec.bitrate_priority = 4.0;
     ec.frame_drop_enabled = !smooth;
-    ec.is_quality_scaling_allowed = smooth; // lower the resolution (blur) instead of the frame rate
+    // lower the resolution (blur) instead of the frame rate. VP8 only: FFmpeg's encoders report no QP and keep their
+    // quality with their own rate control; libwebrtc's quality scaler would still run for them on its default
+    // thresholds and drop a 1080p stream to 540p at a bitrate that holds 1080p fine
+    ec.is_quality_scaling_allowed = smooth && codec == "VP8";
     ec.max_qp = smooth ? 63 : 56;
     webrtc::VideoCodecVP8 vp8 = webrtc::VideoEncoder::GetDefaultVp8Settings();
     vp8.numberOfTemporalLayers = 1;

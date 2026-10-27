@@ -34,6 +34,8 @@ public:
     static Camera& Get();
 
     void SetFake(bool fake) { fake_ = fake; }
+    // useFileForFakeVideoCapture: the fake camera plays this Y4M file (8-bit 4:2:0), looped, at its own frame rate
+    void SetFakeFile(std::string path) { fakeFile_ = std::move(path); }
     // Never touches hardware. System order (/dev/video*)
     json Devices() const;
     // False until the first enumeration finished (an empty list before that must not be reported)
@@ -106,6 +108,7 @@ private:
 
     std::function<void()> selectionChanged_;
     std::atomic<bool> fake_{false};
+    std::string fakeFile_; // set once, at start-up
     std::atomic<bool> ready_{false};
     std::atomic<bool> capturing_{false};
 

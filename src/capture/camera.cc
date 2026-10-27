@@ -9,11 +9,13 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 
 #include "capture/camera_devices.h"
 #include "common/log.h"
+#include "common/platform.h"
 
 namespace vv {
 
@@ -53,6 +55,70 @@ webrtc::scoped_refptr<webrtc::I420Buffer> FakeFrame(int width, int height, int n
     for (int y = sy; y < sy + sq; y++) memset(buf->MutableDataY() + y * buf->StrideY() + sx, 235, sq);
     return buf;
 }
+
+// A Y4M file (8-bit 4:2:0) read frame by frame, looped: the fake camera with useFileForFakeVideoCapture
+class Y4mReader {
+public:
+    explicit Y4mReader(const std::string& path) : file_(OpenFile(path, "rb"))
+    {
+        if (file_ && !ParseHeader()) Close();
+    }
+    ~Y4mReader() { Close(); }
+
+    bool Ok() const { return file_ != nullptr; }
+    int Width() const { return width_; }
+    int Height() const { return height_; }
+    double Fps() const { return fps_; }
+
+    webrtc::scoped_refptr<webrtc::I420Buffer> Next()
+    {
+        char line[128];
+        if (!fgets(line, sizeof(line), file_)) {
+            fseek(file_, data_, SEEK_SET); // loop
+            if (!fgets(line, sizeof(line), file_)) return nullptr;
+        }
+        if (strncmp(line, "FRAME", 5) != 0) return nullptr;
+        auto buf = webrtc::I420Buffer::Create(width_, height_);
+        auto plane = [&](uint8_t* dst, int stride, int w, int h) {
+            for (int y = 0; y < h; y++)
+                if (fread(dst + y * stride, 1, w, file_) != static_cast<size_t>(w)) return false;
+            return true;
+        };
+        int cw = (width_ + 1) / 2, ch = (height_ + 1) / 2;
+        if (!plane(buf->MutableDataY(), buf->StrideY(), width_, height_) || !plane(buf->MutableDataU(), buf->StrideU(), cw, ch) ||
+            !plane(buf->MutableDataV(), buf->StrideV(), cw, ch))
+            return nullptr;
+        return buf;
+    }
+
+private:
+    bool ParseHeader()
+    {
+        char header[256];
+        if (!fgets(header, sizeof(header), file_) || strncmp(header, "YUV4MPEG2 ", 10) != 0) return false;
+        for (char* t = strtok(header + 10, " \n"); t; t = strtok(nullptr, " \n")) {
+            if (t[0] == 'W') width_ = atoi(t + 1);
+            else if (t[0] == 'H') height_ = atoi(t + 1);
+            else if (t[0] == 'F') {
+                int num = 0, den = 1;
+                if (sscanf(t + 1, "%d:%d", &num, &den) == 2 && num > 0 && den > 0) fps_ = static_cast<double>(num) / den;
+            } else if (t[0] == 'C' && strncmp(t + 1, "420", 3) != 0) return false;
+        }
+        data_ = ftell(file_);
+        return width_ > 0 && height_ > 0;
+    }
+
+    void Close()
+    {
+        if (file_) fclose(file_);
+        file_ = nullptr;
+    }
+
+    FILE* file_;
+    int width_ = 0, height_ = 0;
+    double fps_ = 30;
+    long data_ = 0;
+};
 
 } // namespace
 
@@ -419,20 +485,32 @@ bool Camera::Start(const std::string& guid, Capture& c)
             VV_LOGW("camera", "no camera %s", guid.c_str());
             return false;
         }
+        std::shared_ptr<Y4mReader> file;
+        if (!fakeFile_.empty()) {
+            file = std::make_shared<Y4mReader>(fakeFile_);
+            if (!file->Ok()) {
+                VV_LOGE("camera", "cannot read fake video file %s (Y4M, 8-bit 4:2:0)", fakeFile_.c_str());
+                file.reset();
+            } else {
+                width = file->Width(), height = file->Height(), fps = std::max(1, static_cast<int>(std::lround(file->Fps())));
+            }
+        }
         c.fakeRunning = std::make_shared<std::atomic<bool>>(true);
-        c.fakeThread = std::thread([source, running = c.fakeRunning, width, height, fps] {
+        c.fakeThread = std::thread([source, running = c.fakeRunning, width, height, fps, file] {
             int n = 0;
             auto next = std::chrono::steady_clock::now();
             while (*running) {
+                webrtc::scoped_refptr<webrtc::I420Buffer> buf = file ? file->Next() : FakeFrame(width, height, n++);
+                if (!buf) break;
                 source->PushFrame(webrtc::VideoFrame::Builder()
-                                      .set_video_frame_buffer(FakeFrame(width, height, n++))
+                                      .set_video_frame_buffer(buf)
                                       .set_timestamp_us(webrtc::TimeMicros())
                                       .build());
                 next += std::chrono::microseconds(1'000'000 / fps);
                 std::this_thread::sleep_until(next);
             }
         });
-        VV_LOGI("camera", "fake camera started: %dx%d @ %d", width, height, fps);
+        VV_LOGI("camera", "fake camera started: %dx%d @ %d%s%s", width, height, fps, file ? " from " : "", file ? fakeFile_.c_str() : "");
         return true;
     }
 

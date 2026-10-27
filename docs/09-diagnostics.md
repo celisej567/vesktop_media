@@ -75,9 +75,9 @@ Runs against `build/out/vesktop_media.node`:
 | undefined symbols | a dependency that would only fail when its code path runs ([02](02-build.md)) |
 | noise models (`tools/noise-models.js`) | the extension: RNNoise by default, DeepFilterNet runs and its state is created, Standard is libwebrtc's suppression, nothing runs with the flag off |
 | two environments (`tools/two-environments.js`: a worker next to the main thread) | the callbacks of one environment go on working after the other one was torn down (the page loaded again in the same renderer process) |
-| exit with a connection (`tools/exit-with-connection.js`) | Node's environment teardown finalizing a connection that was not destroyed: it aborted the renderer when Vesktop restarted ([01](01-architecture.md)) |
+| exit with a connection (`tools/exit-with-connection.js`) | Node's environment teardown finalizing a connection that was not destroyed (as when Vesktop restarts) must not abort the renderer ([01](01-architecture.md)) |
 | speaking / silent | the send gate: every packet decrypts; silence = 10 Opus silence frames, then nothing; the remote user is reported as speaking; the ping callback gets the server's answer |
-| `--dave-reset` | the DAVE deadlock when a transition turns DAVE off |
+| `--dave-reset` | a transition that turns DAVE off without an MLS group: the JS thread stays responsive |
 | receive VP8 / H.264 / H.265, H.264 joined mid-stream | decoders; the key frame watchdog |
 | send camera, `--wants-late`, `--js-inactive`, two layers | the encoder idles until viewers ask; layers forced active; simulcast |
 | `--switch-camera` (the fake source has a second camera, "Strobe Video Source 2") | the selected camera changed in a call: the call's own video report names the new camera within 1.5 s |

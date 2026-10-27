@@ -1,4 +1,4 @@
-// Plain non-blocking IPv4/IPv6 UDP socket
+// Non-blocking IPv4/IPv6 UDP socket (on Windows with overlapped sends, see SendTo)
 #pragma once
 
 #ifdef _WIN32
@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #endif
 
+#include <atomic>
 #include <cstdint>
 #include <initializer_list>
 #include <mutex>
@@ -54,7 +55,14 @@ public:
 
 private:
 #ifdef _WIN32
+    void ReapSends(DWORD timeoutMs);
+
     SocketHandle fd_ = INVALID_SOCKET;
+    // Sends are overlapped (see SendTo): their completions, sends still in the kernel
+    HANDLE port_ = nullptr;
+    bool skipCompletionOnSuccess_ = false;
+    std::atomic<int> inFlight_{0};
+    std::atomic<bool> loggedPending_{false};
 #else
     SocketHandle fd_ = -1;
 #endif

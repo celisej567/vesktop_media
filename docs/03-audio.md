@@ -157,9 +157,8 @@ call), `OnProcessedCapture` resamples a lower capture rate to 48 kHz, so the loo
 
 The loopback is **not** part of the mixer's normal output. `CaptureAdm::NeedMorePlayData` lets libwebrtc mix and take
 its echo reference first, then `Mixer::MixLoopbackInto` adds the loopback to the samples that go to the device
-(resampled when the device does not play at 48 kHz). With the loopback in the reference the echo canceller took the
-test's own voice for echo from the speakers and suppressed the microphone while it played back: the test pulsed,
-louder and closer speech less so, whatever the noise suppression. The cost: with speakers (not headphones) the test
+(resampled when the device does not play at 48 kHz). With the loopback in the reference the echo canceller would take the
+test's own voice for echo from the speakers and suppress the microphone while it plays back. The cost: with speakers (not headphones) the test
 is no longer protected from acoustic feedback by the echo canceller.
 
 Discord sends the loopback options again with every audio setting (three calls for one click), so repeating

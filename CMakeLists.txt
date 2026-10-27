@@ -41,6 +41,7 @@ if(WIN32)
     list(APPEND VV_SOURCES
         src/common/platform_win.cc
         src/common/delay_load_hook_win.cc
+        src/common/watchdog_win.cc
         src/audio/audio_apps_win.cc
         src/audio/soundshare_win.cc
         src/capture/camera_win.cc
@@ -75,8 +76,10 @@ if(WIN32)
     target_compile_definitions(vesktop_media PRIVATE WEBRTC_WIN RTC_ENABLE_WIN_WGC NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE
         _WIN32_WINNT=0x0A00 WINVER=0x0A00 _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES)
     # clang-cl's -Wall is -Weverything; /W3 is clang's -Wall
+    # line tables in a PDB next to the build (not shipped): the watchdog's stacks (src/common/watchdog_win.cc) are
+    # module offsets, symbolized with it
     target_compile_options(vesktop_media PRIVATE /EHsc /W3 -Wno-unused-parameter -Wno-unused-function
-        -Wno-missing-field-initializers)
+        -Wno-missing-field-initializers -gline-tables-only -gcodeview)
 else()
     target_compile_definitions(vesktop_media PRIVATE WEBRTC_POSIX WEBRTC_LINUX)
     target_compile_options(vesktop_media PRIVATE -fexceptions -Wall -Wno-unused-parameter -Wno-unused-function -Wno-missing-field-initializers)
@@ -121,7 +124,7 @@ if(WIN32)
         ncrypt windowscodecs mmdevapi
         # the Rust standard library inside libwebrtc
         ntdll userenv)
-    target_link_options(vesktop_media PRIVATE /DELAYLOAD:node.exe /OPT:REF /OPT:ICF)
+    target_link_options(vesktop_media PRIVATE /DELAYLOAD:node.exe /OPT:REF /OPT:ICF /DEBUG /PDBALTPATH:%_PDB%)
 else()
     # GLib / GIO and PipeWire: headers only, the libraries are loaded at runtime (src/capture)
     find_package(PkgConfig REQUIRED)

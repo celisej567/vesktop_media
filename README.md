@@ -56,8 +56,8 @@ libwebrtc. Never build it against the system's libstdc++.
 **FFmpeg** is our own cut-down build, one library next to the module (`libvesktop_ffmpeg.so`, ~11 MB): the h264 /
 hevc decoders, the encoders `libx264`, `libx265`, `h264_nvenc` and `hevc_nvenc`. Static libavcodec + libavutil +
 x264 + x265 linked with `-Bsymbolic` (its `av_*` names do not clash with Electron's libffmpeg), loaded without
-isolation so malloc / free are the process' (loading it isolated crashed: allocations went through Electron's
-allocator, frees through libc's). x264 and x265 are GPL, so this FFmpeg is GPL, as Vesktop. The NVENC encoders
+isolation so malloc / free are the process' (isolated, allocations would go through Electron's allocator and frees
+through libc's). x264 and x265 are GPL, so this FFmpeg is GPL, as Vesktop. The NVENC encoders
 use the driver's `libnvidia-encode` at runtime (driver 530 or newer).
 
 **RNNoise and DeepFilterNet** are built from those sources into two libraries next to the module,

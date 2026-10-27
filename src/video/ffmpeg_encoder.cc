@@ -169,6 +169,22 @@ struct Params {
     int keyframeInterval;
 };
 
+// Encoder variants for comparisons (scripts and the encoder benchmark), unset in normal use:
+// VESKTOP_MEDIA_NVENC_PRESET (p1 … p7, p6 by default), VESKTOP_MEDIA_NVENC_MULTIPASS (disabled, qres, fullres by default),
+// VESKTOP_MEDIA_ENCODER_VBV (rate control buffer in seconds, 0.5 by default),
+// VESKTOP_MEDIA_ENCODER_UNTRUSTED=1 (libwebrtc's frame dropper also for hardware encoders)
+const char* EnvOr(const char* name, const char* fallback)
+{
+    const char* v = getenv(name);
+    return v && *v ? v : fallback;
+}
+
+int BufferSize(int bitrate)
+{
+    static const double seconds = atof(EnvOr("VESKTOP_MEDIA_ENCODER_VBV", "0.5"));
+    return std::max(static_cast<int>(bitrate * (seconds > 0 ? seconds : 0.5)), 100000);
+}
+
 // Opens an encoder context with our low latency settings; null when it doesn't open (no GPU, driver, …)
 void* OpenContext(const Api* api, const Backend& b, EncodeCodec codec, const Params& p)
 {
@@ -183,18 +199,23 @@ void* OpenContext(const Api* api, const Backend& b, EncodeCodec codec, const Par
     set("video_size", size);
     set("pixel_format", "yuv420p");
     char tb[32];
-    snprintf(tb, sizeof(tb), "1/%d", 90000); // RTP clock: pts = the frame's RTP timestamp
+    // In frames: NVENC and x265 take their frame rate, and with it each frame's share of the bitrate, from the time
+    // base when it is not given otherwise (AVCodecContext::framerate has no option). A 1/90000 time base (the RTP
+    // clock) made them budget for 90000 frames a second: a fraction of the bitrate and a blurred picture on motion
+    snprintf(tb, sizeof(tb), "1/%d", std::max(1, p.fps));
     set("time_base", tb);
     seti("b", p.bitrate);
     seti("maxrate", p.bitrate);
-    seti("bufsize", std::max(p.bitrate / 2, 100000)); // half a second: few spikes, quick to react
+    seti("bufsize", BufferSize(p.bitrate)); // half a second: few spikes, quick to react
     seti("g", p.keyframeInterval);
     seti("bf", 0); // B-frames add a frame of delay each
     set("forced-idr", "1");
     bool nvenc = strstr(b.encoder, "nvenc") != nullptr;
     if (nvenc) {
-        // newer presets p1 … p7 with tune ll; FFmpeg < 4.3 knows only the old names
-        if (!set("preset", "p4") || !set("tune", "ll")) set("preset", "llhq");
+        // p6 with a full resolution first pass, as Discord's own encoder for H.265: less blur on motion at the same
+        // bitrate (docs/05-video-send.md). Newer presets p1 … p7 with tune ll; FFmpeg < 4.3 knows only the old names
+        if (!set("preset", EnvOr("VESKTOP_MEDIA_NVENC_PRESET", "p6")) || !set("tune", "ll")) set("preset", "llhq");
+        set("multipass", EnvOr("VESKTOP_MEDIA_NVENC_MULTIPASS", "fullres"));
         set("rc", "cbr");
         set("zerolatency", "1");
         set("delay", "0");
@@ -311,12 +332,16 @@ public:
         f->width = w;
         f->height = h;
         f->format = kPixFmtYuv420p;
-        // pts: the RTP timestamp, unwrapped (the time base is 1/90000)
+        // pts: the RTP timestamp (90 kHz), unwrapped, in frames of the time base; increasing, so frames that come
+        // faster than the frame rate still get their own
         uint32_t ts = frame.rtp_timestamp();
-        if (havePts_) ptsBase_ += static_cast<uint32_t>(ts - lastRtp_);
-        havePts_ = true;
+        if (havePts_) rtpUnwrapped_ += static_cast<uint32_t>(ts - lastRtp_);
         lastRtp_ = ts;
-        *reinterpret_cast<int64_t*>(reinterpret_cast<uint8_t*>(frame_) + kFramePtsOffset) = ptsBase_;
+        int64_t pts = rtpUnwrapped_ * openFps_ / 90000;
+        if (havePts_ && pts <= lastPts_) pts = lastPts_ + 1;
+        havePts_ = true;
+        lastPts_ = pts;
+        *reinterpret_cast<int64_t*>(reinterpret_cast<uint8_t*>(frame_) + kFramePtsOffset) = pts;
         *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(frame_) + api_->pictTypeOffset) = key ? kPictureTypeI : 0;
 
         int rc = api_->avcodec_send_frame(ctx_, frame_);
@@ -363,7 +388,8 @@ public:
         info.implementation_name = std::string("FFmpeg ") + backend_->encoder;
         info.is_hardware_accelerated = backend_->hardware;
         info.supports_native_handle = false;
-        info.has_trusted_rate_controller = backend_->hardware;
+        static const bool untrusted = getenv("VESKTOP_MEDIA_ENCODER_UNTRUSTED") != nullptr;
+        info.has_trusted_rate_controller = backend_->hardware && !untrusted;
         info.requested_resolution_alignment = 2;
         info.scaling_settings = webrtc::VideoEncoder::ScalingSettings::kOff; // no QP reported
         return info;
@@ -380,6 +406,9 @@ private:
         }
         if (!frame_) frame_ = api_->av_frame_alloc();
         if (!packet_) packet_ = api_->av_packet_alloc();
+        openFps_ = std::max(1, params_.fps);
+        havePts_ = false; // a new encoder starts its timestamps again
+        rtpUnwrapped_ = 0;
         VV_LOGI("video", "%s: %dx%d @ %d, %d kbit/s", backend_->encoder, params_.width, params_.height, params_.fps,
                 params_.bitrate / 1000);
         return frame_ && packet_;
@@ -397,7 +426,7 @@ private:
         // libx264 and nvenc pick the new rate up on the next frame (x264_encoder_reconfig / NVENC reconfigure)
         api_->av_opt_set_int(ctx_, "b", params_.bitrate, 0);
         api_->av_opt_set_int(ctx_, "maxrate", params_.bitrate, 0);
-        api_->av_opt_set_int(ctx_, "bufsize", std::max(params_.bitrate / 2, 100000), 0);
+        api_->av_opt_set_int(ctx_, "bufsize", BufferSize(params_.bitrate), 0);
     }
 
     const Api* api_;
@@ -412,7 +441,9 @@ private:
     int pendingBitrate_ = 0;
     bool havePts_ = false;
     uint32_t lastRtp_ = 0;
-    int64_t ptsBase_ = 0;
+    int64_t rtpUnwrapped_ = 0;
+    int64_t lastPts_ = 0;
+    int openFps_ = 30; // the time base of the open encoder: 1/openFps_
     int errors_ = 0;
 };
 

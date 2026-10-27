@@ -21,8 +21,8 @@ With a native engine:
 
 * **the renderer sandbox is off** (`sandbox: !isNativeVoiceEnabled()` in `mainWindow.ts`): an N-API module can only be
   loaded into a renderer with Node integration in its preload;
-* **venmic is not used**: once created it keeps a PipeWire thread in the main process for good, which crashed Vesktop
-  while the engine's stream audio streams came and went. Listing audio applications uses `pw-dump`, then `pactl`.
+* **venmic is not used**: once created it keeps a PipeWire thread in the main process for good, which does not
+  survive the engine's stream audio streams coming and going. Listing audio applications uses `pw-dump`, then `pactl`.
 
 The main process prepares `module_data` and `logs` in Vesktop's data directory and hands the paths over.
 
@@ -142,8 +142,8 @@ model cannot run). The patch of
 and the model (`onNoiseOptionSelected`), Vesktop's setting `nativeVoiceNoiseModel` remembers the model and applies it
 at start-up. Discord forces the flag off when Krisp is unsupported in two places, so two more patches leave that out:
 in the settings it reads back (`getNoiseOverrides`), and once at start-up, where it saves the flag off when the engine
-does not declare Krisp's feature (`keepsNoiseCancellation`; without it the saved choice of a model was gone after a
-restart and the setting showed "None").
+does not declare Krisp's feature (`keepsNoiseCancellation`; without it the saved choice of a model would be lost on
+restart).
 
 **The noise button of the call panel.** Discord shows it (a microphone with a wave, next to the connection info, in the
 voice panel at the bottom left) only when Krisp is supported. A patch makes the panel treat noise cancellation as

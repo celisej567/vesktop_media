@@ -14,6 +14,8 @@
 #include <unistd.h>
 #endif
 
+#include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -32,6 +34,15 @@ void EnsureWinsock()
     }();
     (void)started;
 }
+
+// An overlapped send: the packet's copy lives until the send completes
+struct PendingSend {
+    WSAOVERLAPPED overlapped;
+    uint8_t data[1];
+};
+
+// sends still in the kernel; beyond that packets are dropped (about 2.5 MB of video)
+constexpr int kMaxInFlight = 2048;
 } // namespace
 #endif
 
@@ -105,11 +116,13 @@ bool UdpSocket::Open(int family)
     family_ = family;
 #ifdef _WIN32
     EnsureWinsock();
-    fd_ = WSASocketW(family, SOCK_DGRAM, IPPROTO_UDP, nullptr, 0, WSA_FLAG_NO_HANDLE_INHERIT);
+    fd_ = WSASocketW(family, SOCK_DGRAM, IPPROTO_UDP, nullptr, 0, WSA_FLAG_NO_HANDLE_INHERIT | WSA_FLAG_OVERLAPPED);
     if (fd_ == INVALID_SOCKET) {
         VV_LOGE("udp", "socket() failed: %d", WSAGetLastError());
         return false;
     }
+    port_ = CreateIoCompletionPort(reinterpret_cast<HANDLE>(fd_), nullptr, 0, 1);
+    skipCompletionOnSuccess_ = SetFileCompletionNotificationModes(reinterpret_cast<HANDLE>(fd_), FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
     u_long nonBlocking = 1;
     ioctlsocket(fd_, FIONBIO, &nonBlocking);
     // without this an ICMP "port unreachable" makes the next recvfrom fail with WSAECONNRESET and the socket
@@ -134,17 +147,65 @@ void UdpSocket::Close()
 {
     if (!IsOpen()) return;
 #ifdef _WIN32
-    closesocket(fd_);
+    closesocket(fd_); // cancels the sends still in the kernel; their completions follow
     fd_ = INVALID_SOCKET;
+    if (port_) {
+        for (int i = 0; i < 20 && inFlight_ > 0; i++) ReapSends(50);
+        if (inFlight_ > 0) VV_LOGW("udp", "%d sends never completed (their buffers are leaked)", inFlight_.load());
+        else CloseHandle(port_);
+        port_ = nullptr;
+        inFlight_ = 0;
+    }
 #else
     close(fd_);
     fd_ = -1;
 #endif
 }
 
+#ifdef _WIN32
+void UdpSocket::ReapSends(DWORD timeoutMs)
+{
+    OVERLAPPED_ENTRY entries[64];
+    ULONG n = 0;
+    while (port_ && GetQueuedCompletionStatusEx(port_, entries, 64, &n, timeoutMs, FALSE) && n > 0) {
+        for (ULONG i = 0; i < n; i++) free(CONTAINING_RECORD(entries[i].lpOverlapped, PendingSend, overlapped));
+        inFlight_ -= static_cast<int>(n);
+        timeoutMs = 0;
+    }
+}
+#endif
+
 bool UdpSocket::SendTo(const uint8_t* data, size_t length, const SocketAddress& to)
 {
     if (!IsOpen()) return false;
+#ifdef _WIN32
+    // Overlapped: a plain sendto waits until the kernel is done with the packet even on a non-blocking socket, and a
+    // network filter (VPN, firewall) can hold packets for a long time. That blocked the voice worker thread, which
+    // sends every packet (the pacer runs on it), for seconds at a time
+    ReapSends(0);
+    if (port_) {
+        if (inFlight_ >= kMaxInFlight) return false;
+        auto* p = static_cast<PendingSend*>(malloc(offsetof(PendingSend, data) + length));
+        if (!p) return false;
+        memset(&p->overlapped, 0, sizeof(p->overlapped));
+        memcpy(p->data, data, length);
+        WSABUF buf{static_cast<ULONG>(length), reinterpret_cast<char*>(p->data)};
+        DWORD sent = 0;
+        if (WSASendTo(fd_, &buf, 1, &sent, 0, reinterpret_cast<const sockaddr*>(&to.storage), to.length, &p->overlapped, nullptr) == 0) {
+            // done at once; without FILE_SKIP_COMPLETION_PORT_ON_SUCCESS the completion is still queued
+            if (skipCompletionOnSuccess_) free(p);
+            else inFlight_++;
+            return true;
+        }
+        if (WSAGetLastError() == WSA_IO_PENDING) {
+            inFlight_++;
+            if (!loggedPending_.exchange(true)) VV_LOGI("udp", "sends complete asynchronously here (a network filter holds them)");
+            return true;
+        }
+        free(p);
+        return false;
+    }
+#endif
     auto sent = sendto(fd_, reinterpret_cast<const char*>(data), static_cast<int>(length), 0,
                        reinterpret_cast<const sockaddr*>(&to.storage), to.length);
     return sent == static_cast<decltype(sent)>(length);

@@ -62,6 +62,10 @@ let sourceEnded = false;
 // --switch-camera: the selected camera is changed during the call (voice.setVideoInputDevice); the call must send
 // the new one at once (its own video report names the new camera), not when something else changes its video
 const SWITCH_CAMERA = args.includes("--switch-camera");
+// --switch-codec: Discord's JS changes the video codec during the call (another payload type, the layers come back with
+// `active: false`, see --js-inactive); the recreated stream must send again
+const SWITCH_CODEC = args.includes("--switch-codec");
+let framesAtCodecSwitch = null;
 let cameraSwitchedAt = 0, cameraSwitchedMs = null;
 // --no-destroy: the connection is not destroyed before exiting, so Node's environment teardown (as when the window is
 // reloaded or Vesktop restarts) finalizes it: that once aborted the renderer (exit code 134)
@@ -491,6 +495,15 @@ sock.bind(0, "127.0.0.1", () => {
                                 cameraSwitchedAt = Date.now();
                                 voice.setVideoInputDevice("Strobe Video Source 2");
                             }, 1500);
+                        if (SWITCH_CODEC)
+                            setTimeout(() => {
+                                framesAtCodecSwitch = video.frames;
+                                log("codec switch: frames so far", video.frames);
+                                conn.setTransportOptions({
+                                    streamParameters: streamParameters.map(p => (p.type === "video" ? { ...p, active: false } : p)),
+                                    videoEncoder: { name: VIDEO, type: VIDEO_PT, rtxType: VIDEO_PT + 7, params: {} }
+                                });
+                            }, 1500);
                     });
 
                 setTimeout(() => {
@@ -527,6 +540,11 @@ sock.bind(0, "127.0.0.1", () => {
                                 log("outbound video:", out ? JSON.stringify({ ssrc: out.ssrc, codec: out.codecName, encoder: out.encoderImplementationName, framesEncoded: out.framesEncoded, mediaBitrate: out.mediaBitrate, substreams: out.substreams?.length }) : "none");
                                 videoOk = videoOk && out?.framesEncoded > 0;
                             }
+                        }
+                        if (SWITCH_CODEC) {
+                            const after = framesAtCodecSwitch === null ? 0 : video.frames - framesAtCodecSwitch;
+                            log("codec switch:", JSON.stringify({ framesBefore: framesAtCodecSwitch, framesAfter: after }));
+                            videoOk = videoOk && framesAtCodecSwitch > 0 && after >= 10;
                         }
                         if (SWITCH_CAMERA) {
                             log("camera switch:", cameraSwitchedMs === null ? "not sent" : `${cameraSwitchedMs} ms`);

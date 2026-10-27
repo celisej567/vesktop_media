@@ -24,6 +24,9 @@
 #include "audio/rnnoise.h"
 #include "capture/camera.h"
 #include "video/video_sinks.h"
+#ifdef _WIN32
+#include "common/watchdog_win.h"
+#endif
 #include "common/log.h"
 #include "common/platform.h"
 #include "common/util.h"
@@ -129,6 +132,7 @@ void Engine::Initialize(const json& options)
     dataDirectory_ = dir.empty() ? PathToUtf8(std::filesystem::temp_directory_path()) : dir;
     fakeAudio_ = vv::Get(options, "useFakeAudioCapture", false);
     Camera::Get().SetFake(vv::Get(options, "useFakeVideoCapture", false));
+    Camera::Get().SetFakeFile(vv::Get<std::string>(options, "useFileForFakeVideoCapture", ""));
     Camera::Get().SetSelectionChangedCallback([this] {
         std::lock_guard lock(connectionsMutex_);
         for (auto* c : connections_) c->OnVideoDeviceSelected();
@@ -142,6 +146,12 @@ void Engine::Initialize(const json& options)
     worker_ = webrtc::Thread::Create();
     worker_->SetName("Voice", nullptr);
     worker_->Start();
+#ifdef _WIN32
+    StartWorkerWatchdog(worker_.get());
+    // VESKTOP_MEDIA_TEST_STALL_WORKER=<ms>: the worker sleeps that long 3 s after initialize (tests the watchdog)
+    if (int ms = atoi(getenv("VESKTOP_MEDIA_TEST_STALL_WORKER") ? getenv("VESKTOP_MEDIA_TEST_STALL_WORKER") : "0"); ms > 0)
+        worker_->PostDelayedTask([ms] { Sleep(ms); }, webrtc::TimeDelta::Seconds(3));
+#endif
 
     vad_ = WebRtcVad_Create();
     WebRtcVad_Init(static_cast<WebRtcVadInst*>(vad_));

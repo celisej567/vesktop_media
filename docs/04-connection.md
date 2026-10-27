@@ -26,8 +26,8 @@ module only speaks **UDP** to the SFU: one socket per connection for IP discover
 
 * the discovery response (74 bytes, type 2);
 * **keepalive pings**: every `setPingInterval` ms (default 5 s) an 8-byte ping `13 37 ca fe` + sequence (u32 LE)
-  goes out. Discord's servers answer `13 37 f0 0d` + the same sequence (not an echo: seen in a real call, where only
-  echoes were expected and every ping timed out, which Discord shows as a ping of 4000 ms); the answer gives the
+  goes out. Discord's servers answer `13 37 f0 0d` + the same sequence (not an echo, seen in a real call; an unanswered ping
+  shows in Discord as a ping of 4000 ms); the answer gives the
   round trip time to the ping callback. An echo is accepted too. A ping without an answer within 4 s calls the
   ping timeout callback, from which JS judges the connection's health;
 * RTCP (packet type 200 to 206) and RTP: decrypted, then posted to the worker, which delivers them to the `Call`.
@@ -41,8 +41,7 @@ ping right away to refresh NAT bindings.
 `MediaTransport` is the `webrtc::Transport` the streams send through: it encrypts and sends. It also reports every
 sent packet to the call (`Call::OnSentPacket` with the transport sequence number and the wire size). libwebrtc's
 congestion controller matches transport-cc feedback from the SFU against those send times; without them every
-feedback is dropped ("Failed to lookup send time"), the delay-based estimate never grows, and video stayed at about
-4 Mbit/s whatever was allowed.
+feedback is dropped ("Failed to lookup send time") and the delay-based estimate never grows.
 
 ## Transport encryption
 
@@ -95,7 +94,7 @@ per user). Volume, local mute, pan and deafen are applied through the stream's g
 our own. The gateway's SPEAKING message only gives a user's flags (voice, soundshare, priority), which JS passes on
 with `setRemoteUserSpeakingStatus`. `UpdateRemoteSpeaking` (worker, every 50 ms) reads each receive stream's decoded
 audio level; a user speaks while it is above about -40 dBFS and 300 ms after, and the callback gets their flags (voice
-if the gateway gave none). Without it nobody lit up although everybody was heard.
+if the gateway gave none). Without it nobody would light up although everybody is heard.
 
 ## Bandwidth estimation
 

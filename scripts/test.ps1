@@ -88,6 +88,8 @@ try {
     Check 'outbound video|video sink' @('--seconds', '3', '--video', 'VP8', '--layers', '2') | Out-Null
     Write-Host '== the selected camera changed during a call'
     Check 'camera switch|outbound video|video sink' @('--seconds', '4', '--video', 'VP8', '--switch-camera') | Out-Null
+    Write-Host '== video codec changed during the call: the recreated stream starts its layers again'
+    Check 'codec switch|outbound video' @('--seconds', '4', '--video', 'VP8', '--switch-codec') | Out-Null
     Write-Host '== Go Live with a device (setGoLiveDevices, fake camera)'
     Check 'outbound video|video sink' @('--seconds', '3', '--video', 'VP8', '--golive-camera') | Out-Null
     # soundshare: a 440 Hz tone played by a process of its own, shared by its pid (process loopback). Needs an audio

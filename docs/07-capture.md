@@ -98,9 +98,8 @@ Everything that touches a device runs on the camera's own thread, never on the "
 * opening a V4L2 device takes 0.5 to 2 s;
 * **libwebrtc's device enumeration probes every camera**: it finds the modes with a `VIDIOC_TRY_FMT` per format and
   size (about 200 per node), and each is a UVC probe request to the camera. That stalls or kills a capture that is
-  running (measured: frames stop, each enumeration takes 3 to 7 s), and it made a camera that another program (OBS)
-  was streaming drop off the USB bus and come back, again and again, while Vesktop was open (kernel log: `Failed to
-  set UVC probe control`, `USB disconnect`, in bursts that matched the enumerations).
+  running (measured: frames stop, each enumeration takes 3 to 7 s), and can make a camera that another program (OBS)
+  streams drop off the USB bus and come back (kernel log: `Failed to set UVC probe control`, `USB disconnect`).
 
 So the module lists cameras itself (`ListDevices`): every `/dev/videoN` is opened once for reading, and only
 `VIDIOC_QUERYCAP`, `ENUM_FMT`, `ENUM_FRAMESIZES` and `ENUM_FRAMEINTERVALS` are used. They answer from the driver's
@@ -139,9 +138,8 @@ request to such a camera is a probe of it), so there is one attempt, and `Apply(
 
 **Changing the selected camera in a call.** `Camera::SetDevice` starts the new camera and stops the old one, and
 tells the calls (`Connection::OnVideoDeviceSelected`, through the callback `Engine` sets): a call takes its frame
-source from the selected camera when its video send is set up (`UpdateVideoSend`), so without being told it went on
-sending the old camera (for 10 to 25 seconds in a real call) until something else made Discord change its video, and
-then switched abruptly. A Go Live stream sends its own source and ignores the selection.
+source from the selected camera when its video send is set up (`UpdateVideoSend`), so without being told it would go
+on sending the old camera until something else made Discord change its video. A Go Live stream sends its own source and ignores the selection.
 
 ### Capture options (Vesktop extension)
 

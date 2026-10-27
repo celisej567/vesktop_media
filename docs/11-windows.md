@@ -80,6 +80,31 @@ that is closed ends the stream (checked on every frame: WGC can keep handing out
 
 Captures need the user's desktop: a process in session 0 (a service, an SSH session) gets no frames.
 
+The module runs in the renderer process, which is in the background while the user streams a game. Chromium lowers a
+background renderer's priority and Windows then runs it on efficiency cores with coalesced timers, so libwebrtc's
+pacer, transport feedback and the worker thread stall for seconds (video at a few hundred kbit/s, audio with gaps).
+Vesktop therefore starts Electron as the official client does: `disable-renderer-backgrounding`,
+`disable-background-timer-throttling`, and the features `UseEcoQoSForBackgroundProcess`, `IntensiveWakeUpThrottling`,
+`AllowAggressiveThrottlingWithWebSocket` disabled (`src/main/main.ts`).
+
+## Sending
+
+UDP sends are overlapped (`transport/udp_socket.cc`): a plain `sendto` waits until the kernel is done with the packet,
+even on a non-blocking socket, and a network filter (a VPN, a firewall) can hold packets for a long time. Every RTP
+packet is sent from the voice worker thread (libwebrtc's pacer runs there), so a waiting `sendto` stopped the
+module's sending, receiving and bandwidth estimation for seconds. Each send copies the packet; its completion (on an
+I/O completion port, collected before the next send) frees it. At most 2048 sends wait in the kernel; beyond that
+packets are dropped. The log says once when sends complete asynchronously.
+
+## Stall diagnostics
+
+`common/watchdog_win.cc` posts a task to the voice worker thread every 250 ms. When one has not run after 3 s, the
+call stacks of every thread with a frame in the module go to the log (`watchdog:` lines, once per stall, at most 3
+times per process), as `module+offset`. The build writes line tables to `build/main/out/vesktop_media.pdb` (not
+shipped); `llvm-symbolizer --obj=vesktop_media.node 0x180000000+offset` names the functions, with the PDB of that same
+build next to it. `VESKTOP_MEDIA_TEST_STALL_WORKER=<ms>` makes the worker sleep that long 3 s after initialize, to try
+it.
+
 ## Cameras
 
 `capture/camera_win.cc`: libwebrtc's DirectShow `DeviceInfo` lists the video input devices and their registered
