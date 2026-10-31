@@ -1,6 +1,7 @@
 #include "common/platform.h"
 
 #include <dlfcn.h>
+#include <unistd.h>
 
 #include <filesystem>
 
@@ -47,15 +48,18 @@ void* OpenLibrary(std::initializer_list<const char*> names, bool isolated)
     return nullptr;
 }
 
-void* OpenLocalLibrary(const char* name, std::string* path)
+void* OpenLocalLibrary(const char* name, std::string* path, std::string* error)
 {
     auto dir = ModuleDirectory();
-    if (dir.empty()) return nullptr;
     auto local = std::filesystem::path(dir) / name;
     std::error_code ec;
-    if (!std::filesystem::exists(local, ec)) return nullptr;
+    if (dir.empty() || !std::filesystem::exists(local, ec)) {
+        if (error) *error = "not found next to the module";
+        return nullptr;
+    }
     void* h = dlopen(local.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (h && path) *path = local.string();
+    if (!h && error) *error = dlerror();
     return h;
 }
 
@@ -77,6 +81,28 @@ void CloseLibrary(void* library)
 void* HostSymbol(const char* name)
 {
     return dlsym(RTLD_DEFAULT, name);
+}
+
+int ProcessMemoryMb()
+{
+    FILE* f = fopen("/proc/self/statm", "r");
+    if (!f) return -1;
+    long size = 0, resident = 0;
+    int n = fscanf(f, "%ld %ld", &size, &resident);
+    fclose(f);
+    return n == 2 ? static_cast<int>(resident * sysconf(_SC_PAGESIZE) / (1024 * 1024)) : -1;
+}
+
+int SystemAvailableMemoryMb()
+{
+    FILE* f = fopen("/proc/meminfo", "r");
+    if (!f) return -1;
+    char line[128];
+    long kb = -1;
+    while (fgets(line, sizeof(line), f))
+        if (sscanf(line, "MemAvailable: %ld kB", &kb) == 1) break;
+    fclose(f);
+    return kb < 0 ? -1 : static_cast<int>(kb / 1024);
 }
 
 } // namespace vv

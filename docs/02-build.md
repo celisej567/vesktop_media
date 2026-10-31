@@ -52,8 +52,15 @@ H.264 and H.265 need FFmpeg (decoding and encoding). Electron's own libffmpeg ha
 no encoders, and system FFmpeg versions vary, so `scripts/build-ffmpeg.sh` builds our own, cut down:
 
 * FFmpeg 7.1.1 with `--disable-everything` and only the h264 / hevc decoders and parsers, the encoders
-  `libx264`, `libx265`, `h264_nvenc`, `hevc_nvenc`;
+  `libx264`, `libx265`, `h264_nvenc`, `hevc_nvenc`, `h264_vaapi`, `hevc_vaapi`;
 * x264 (stable branch, 8 bit, 4:2:0), x265 4.1, nv-codec-headers 12.1 (NVENC SDK 12.1, NVIDIA drivers 530+);
+* libva 2.22 and libdrm 2.4 (with meson: the system's, else one installed into a local virtual environment): only
+  the headers and libraries FFmpeg's configure tests VA-API against. libva builds shared libraries only, so the
+  script archives its position independent objects and adds the dependencies its pkg-config files leave out
+  (libdrm, `-ldl`);
+* `scripts/vesktop_va.c` in place of libva: FFmpeg's libva calls go to the system's libva (below);
+* `scripts/vesktop_hw.c`, compiled against this FFmpeg's headers: the VA-API frame plumbing
+  (`av_vesktop_vaapi_open` / `av_vesktop_vaapi_send`, see [05](05-video-send.md));
 * everything static, then linked into **one** shared library `libvesktop_ffmpeg.so` with `-Bsymbolic` and a version
   script that exports only `av_*`, `avcodec_*`, `avutil_*`.
 
@@ -71,6 +78,16 @@ Why it is built this way (each avoids a crash):
   them out (they only matter for Apple Clang and old `if()` quoting) and passes `CMAKE_POLICY_VERSION_MINIMUM=3.5`.
 * The NVENC encoders load the driver's `libnvidia-encode` at runtime; without an NVIDIA GPU they simply fail to open
   and are not offered (see [05](05-video-send.md)).
+* **The system's libva, loaded at runtime.** A VA driver (Mesa's `radeonsi_drv_video.so`, Intel's `iHD_drv_video.so`)
+  is built against the system's libva and exports its init function for that libva's version only
+  (`__vaDriverInit_1_24`): a libva of our own, older than the driver, cannot load it ("has no function
+  __vaDriverInit_1_0"). `scripts/vesktop_va.c` defines every libva function FFmpeg calls as a jump through a table,
+  filled from `libva.so.2` / `libva-drm.so.2` when FFmpeg first asks for a display (`vaGetDisplayDRM`); the build
+  fails when FFmpeg calls one it does not forward. Without a system libva, or one missing a function, there is no
+  display and no VA-API, and nothing else depends on it (no `DT_NEEDED`). Two newer functions are replaced when the
+  libva lacks them: `vaMapBuffer2` (2.21) by `vaMapBuffer`, `vaSyncBuffer` (2.9) by "unimplemented", on which FFmpeg
+  waits on the surface. Without a driver that encodes, the VA-API encoders fail to open and are not offered.
+* `scripts/build-ffmpeg.sh` rebuilds when its `BUILD_STAMP` differs from the one of the existing build.
 
 x264 and x265 are GPL, so this FFmpeg is GPL, as Vesktop is. If `libvesktop_ffmpeg.so` is missing the module falls
 back to a system FFmpeg (libavcodec 58 to 63), loaded with `RTLD_DEEPBIND`, and for decoding also to Electron's

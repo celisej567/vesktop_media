@@ -34,6 +34,8 @@ public:
     uint64_t FramesPushed() const { return frames_; }
     int LastWidth() const { return lastWidth_; }
     int LastHeight() const { return lastHeight_; }
+    // The output frame rate (encodingVideoFrameRate; 30 until it is set)
+    int OutputFps() const { return fps_; }
     const std::string& Name() const { return name_; }
 
     // VideoTrackSourceInterface

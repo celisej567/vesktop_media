@@ -50,6 +50,7 @@ if(WIN32)
 else()
     list(APPEND VV_SOURCES
         src/common/platform.cc
+        src/common/crash_handler_linux.cc
         src/audio/soundshare.cc
         src/capture/camera_v4l2.cc
         src/capture/egl_dmabuf.cc

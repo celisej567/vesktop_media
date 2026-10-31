@@ -1,5 +1,6 @@
 #include "common/log.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -8,6 +9,9 @@
 #include <mutex>
 
 #include "common/platform.h"
+#ifndef _WIN32
+#include "common/crash_handler.h"
+#endif
 
 namespace vv {
 
@@ -20,6 +24,14 @@ size_t gMaxBytes = 5'000'000;
 size_t gWritten = 0;
 int gMinLevel = static_cast<int>(LogLevel::Info);
 bool gStderr = std::getenv("VESKTOP_MEDIA_LOG_STDERR") != nullptr;
+std::atomic<int> gFd{-1};
+
+void SetFd()
+{
+#ifndef _WIN32
+    gFd = gFile ? fileno(gFile) : -1;
+#endif
+}
 
 const char* LevelName(LogLevel level)
 {
@@ -40,6 +52,7 @@ void Rotate()
     std::filesystem::rename(PathFromUtf8(gPath), PathFromUtf8(gPath + ".1"), ec);
     gFile = OpenFile(gPath, "w");
     gWritten = 0;
+    SetFd();
 }
 
 void Write(const char* level, const char* tag, const char* message)
@@ -87,6 +100,10 @@ void LogInit(const std::string& directory, int level, size_t maxBytes)
         fseek(gFile, 0, SEEK_END);
         gWritten = static_cast<size_t>(ftell(gFile));
     }
+    SetFd();
+#ifndef _WIN32
+    InstallCrashHandler();
+#endif
 }
 
 bool LogEnabled(LogLevel level)
@@ -119,6 +136,11 @@ void LogRaw(const std::string& level, const std::string& message)
     else if (level == "trace" || level == "debug") l = LogLevel::Verbose;
     if (!LogEnabled(l)) return;
     Write(LevelName(l), "js", message.c_str());
+}
+
+int LogFileDescriptor()
+{
+    return gFd;
 }
 
 } // namespace vv

@@ -61,6 +61,11 @@ application, so `appId` is empty there.
 * asks for raw video, BGRx / RGBx / BGRA / RGBA, any size up to 16384², up to 240 fps, in **shared memory
   buffers** (`MemPtr` / `MemFd`), and before that as DMA-BUF (below; `VESKTOP_MEDIA_PIPEWIRE_DMABUF=0` leaves it
   out);
+* offers `maxFramerate` from 0 up to the stream's frame rate (`FrameSource::OutputFps`, 30 until Discord sets
+  `encodingVideoFrameRate`), that rate as the default, and offers the formats again when it changes. The compositor
+  paces its frames to it (KWin waits until a frame interval has passed and then still sends the latest state)
+  instead of rendering and handing over one frame per refresh of a 144 or 240 Hz output, most of which the frame
+  source would drop. On a slower output the intersection is the output's refresh rate;
 * on each `process` callback drains the queue and keeps only the newest buffer (a slow consumer skips frames rather
   than falling behind), skips corrupted buffers, converts to I420 and pushes into the frame source.
 

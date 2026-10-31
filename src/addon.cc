@@ -569,11 +569,17 @@ Napi::Value SetVideoEncoderPreference(Info info)
     return info.Env().Undefined();
 }
 
-// Vesktop extension: getVideoEncoders(cb({h264, h265})): the FFmpeg encoder each would use ("" = none)
+// Vesktop extension: getVideoEncoders() = {h264, h265, preference, available}: the FFmpeg encoder each would use
+// ("" = none), the preference, and every encoder that opens here ([{name, family, codec}], family "nvenc" / "amf" /
+// "vaapi" / "software")
 Napi::Value GetVideoEncoders(Info info)
 {
+    json available = json::array();
+    for (auto codec : {EncodeCodec::H264, EncodeCodec::H265})
+        for (auto& e : FfmpegWorkingEncoders(codec))
+            available.push_back({{"name", e.name}, {"family", e.family}, {"codec", codec == EncodeCodec::H264 ? "h264" : "h265"}});
     json r = {{"h264", FfmpegEncoderName(EncodeCodec::H264)}, {"h265", FfmpegEncoderName(EncodeCodec::H265)},
-              {"preference", EncoderPreference()}};
+              {"preference", EncoderPreference()}, {"available", available}};
     return FromJson(info.Env(), r);
 }
 

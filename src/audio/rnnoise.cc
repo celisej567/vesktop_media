@@ -18,9 +18,10 @@ const Api* GetApi()
     static Api api = [] {
         Api a;
         std::string path;
-        void* h = OpenLocalLibrary(VV_LOCAL_LIBRARY("rnnoise"), &path);
+        std::string error;
+        void* h = OpenLocalLibrary(VV_LOCAL_LIBRARY("rnnoise"), &path, &error);
         if (!h) {
-            VV_LOGW("rnnoise", VV_LOCAL_LIBRARY("rnnoise") " not found next to the module, noise cancellation unavailable");
+            VV_LOGW("rnnoise", VV_LOCAL_LIBRARY("rnnoise") " %s, noise cancellation unavailable", error.c_str());
             return a;
         }
         VV_LOGI("rnnoise", "loaded %s", path.c_str());

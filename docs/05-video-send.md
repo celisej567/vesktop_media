@@ -74,19 +74,26 @@ layer:
 | Codec | Encoder |
 |---|---|
 | VP8 | libvpx (in libwebrtc). Always available |
-| H.264 | `h264_nvenc` (NVIDIA), else `libx264` (CPU), from our FFmpeg |
-| H.265 | `hevc_nvenc` (NVIDIA), else `libx265` (CPU), from our FFmpeg |
+| H.264 | `h264_nvenc` (NVIDIA), `h264_amf` (AMD, Windows), `h264_vaapi` (AMD / Intel, Linux), else `libx264` (CPU) |
+| H.265 | `hevc_nvenc`, `hevc_amf`, `hevc_vaapi`, else `libx265` (CPU) |
+
+Our FFmpeg on Linux has NVENC and VA-API, the BtbN build on Windows NVENC and AMF; an encoder the FFmpeg lacks is
+skipped.
 
 AV1 and VP9 are decoded but not encoded. `getCodecCapabilities` tells Discord's JS what can be encoded and decoded,
 which decides what it negotiates.
 
 ### Probing
 
-An encoder compiled into FFmpeg does not mean it works here: NVENC needs an NVIDIA GPU and driver. Every candidate
+An encoder compiled into FFmpeg does not mean it works here: NVENC needs an NVIDIA GPU and driver, AMF an AMD GPU
+and driver, VA-API a VA driver that encodes (Mesa's radeonsi, Intel's iHD; NVIDIA's decodes only). Every candidate
 is opened once on a 256×144 test picture (`Works`), the result cached for the process, and only encoders that open
-are offered. The preference (`setVideoEncoderPreference`: `auto` = hardware first, `hardware`, `software`; or the
-environment variable `VESKTOP_MEDIA_ENCODER` for tests) picks among them; a preference that cannot be met falls
-back to whatever works. Vesktop's setting applies to the next stream or camera.
+are offered. The preference (`setVideoEncoderPreference`: `auto` = hardware first, `hardware` = any GPU encoder,
+`software`, or a GPU family first, `nvenc` / `amf` / `vaapi`, the next in the usual order when it does not work; or the
+environment variable `VESKTOP_MEDIA_ENCODER` for tests, which also takes an encoder's name, e.g. `h264_vaapi`) picks
+among them; a preference that cannot be met falls
+back to whatever works. Vesktop's setting (next to the voice engine) applies to the next stream or camera; it offers the
+families that open here, from `getVideoEncoders().available` (every working encoder: `{name, family, codec}`).
 
 ### The FFmpeg encoder
 
@@ -96,14 +103,27 @@ back to whatever works. Vesktop's setting applies to the next stream or camera.
   quick to react), a key frame on request (PLI from a viewer) and every 60 s otherwise, forced IDR;
 * NVENC: preset `p6` with two passes (`multipass fullres`) and `tune ll` (or `llhq` on FFmpeg older than 4.3), `rc cbr`,
   `zerolatency`, `delay 0`, High profile for H.264;
+* AMF: `usage lowlatency`, `quality quality`, `rc cbr`, `latency 1`; `forced_idr` (a requested key frame is an IDR
+  with SPS / PPS), and the parameter sets before every periodic IDR too (`header_spacing` = the key frame interval for
+  H.264, `header_insertion_mode idr` for H.265). It takes the YUV 4:2:0 frames as they are;
+* VA-API: `rc_mode CBR`, `async_depth 1`, High profile for H.264; the parameter sets come with every IDR, a requested
+  key frame (`pict_type` I) becomes one. The encoders take frames in GPU surfaces only, and the module uses FFmpeg
+  without its headers, so `scripts/vesktop_hw.c` (inside our FFmpeg library) sets the context up
+  (`av_vesktop_vaapi_open`: a device on the DRM render node, a pool of NV12 surfaces) and sends each frame
+  (`av_vesktop_vaapi_send`: interleaved into NV12, uploaded into a surface). The first render node (`renderD128` …)
+  it opens on is kept; `VESKTOP_MEDIA_VAAPI_DEVICE` picks one;
 * x264: `veryfast`, `zerolatency`, High profile, SPS / PPS repeated before every key frame (`repeat-headers`, a
   viewer who joins needs them); x265: `superfast`, `zerolatency`, repeated headers;
 * the time base is one frame (1 / the layer's frame rate) and pts the frame's RTP timestamp, unwrapped, in those
   units: NVENC and x265 take their frame rate, and with it each frame's share of the bitrate, from the time base
   (FFmpeg has no option for `AVCodecContext::framerate`);
 * a size change (the source was resized or adapted) reopens the encoder: a new stream starting with a key frame;
-* a bitrate change of more than 10%: x264 and NVENC take it on the next frame; FFmpeg's libx265 cannot reconfigure,
-  so it is reopened (with a key frame);
+* an encoder is closed by ending its stream (a null frame) and taking the packets it still holds before it is freed:
+  a hardware encoder's driver threads are done with the session first;
+* a bitrate change of more than 10%: x264 and NVENC take it on the next frame. FFmpeg's libx265, AMF and VA-API
+  encoders set the bitrate only when they open, so they are reopened (with a key frame): at once for a drop of more
+  than 15 % (the pacer would hold back what the encoder makes beyond the estimate), for a rise of more than 25 % at
+  most every 3 s;
 * it reports no QP, so libwebrtc's QP-based quality scaler is off for it.
 
 ## Sharp and smooth

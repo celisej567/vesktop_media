@@ -16,6 +16,7 @@
 #include <drm/drm_fourcc.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <vector>
@@ -200,11 +201,15 @@ SyncTimeline FindSyncTimeline(spa_buffer* buffer)
 }
 
 // What we accept: with `egl`, each RGB format as a DMA-BUF with the modifiers the GPU imports (the compositor, which
-// allocates, picks one: DONT_FIXATE), then any of them in shared memory
-std::vector<const spa_pod*> BuildFormats(spa_pod_builder* b, const EglDmaBuf* egl)
+// allocates, picks one: DONT_FIXATE), then any of them in shared memory. At most `maxFps` frames a second (the
+// stream's rate): the compositor paces its frames to that (and still sends the last state when the screen stops
+// changing) instead of rendering and handing over one per refresh of a 144 or 240 Hz output. A range from 0 with the
+// rate as default: on a slower output the intersection is its refresh rate
+std::vector<const spa_pod*> BuildFormats(spa_pod_builder* b, const EglDmaBuf* egl, int maxFps)
 {
     spa_rectangle defSize = {1920, 1080}, minSize = {1, 1}, maxSize = {16384, 16384};
     spa_fraction defRate = {60, 1}, minRate = {0, 1}, maxRate = {240, 1};
+    spa_fraction capRate = {static_cast<uint32_t>(std::max(1, maxFps)), 1};
     std::vector<const spa_pod*> params;
     if (egl) {
         for (auto& f : kRgbFormats) {
@@ -214,7 +219,8 @@ std::vector<const spa_pod*> BuildFormats(spa_pod_builder* b, const EglDmaBuf* eg
             spa_pod_builder_add(b, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video), SPA_FORMAT_mediaSubtype,
                                 SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format, SPA_POD_Id(f.spa), SPA_FORMAT_VIDEO_size,
                                 SPA_POD_CHOICE_RANGE_Rectangle(&defSize, &minSize, &maxSize), SPA_FORMAT_VIDEO_framerate,
-                                SPA_POD_CHOICE_RANGE_Fraction(&defRate, &minRate, &maxRate), 0);
+                                SPA_POD_CHOICE_RANGE_Fraction(&defRate, &minRate, &maxRate), SPA_FORMAT_VIDEO_maxFramerate,
+                                SPA_POD_CHOICE_RANGE_Fraction(&capRate, &minRate, &capRate), 0);
             spa_pod_builder_prop(b, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE);
             spa_pod_builder_push_choice(b, &choice, SPA_CHOICE_Enum, 0);
             spa_pod_builder_long(b, static_cast<int64_t>(mods[0])); // the default
@@ -229,7 +235,8 @@ std::vector<const spa_pod*> BuildFormats(spa_pod_builder* b, const EglDmaBuf* eg
         SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_BGRA,
                                SPA_VIDEO_FORMAT_RGBA),
         SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&defSize, &minSize, &maxSize), SPA_FORMAT_VIDEO_framerate,
-        SPA_POD_CHOICE_RANGE_Fraction(&defRate, &minRate, &maxRate))));
+        SPA_POD_CHOICE_RANGE_Fraction(&defRate, &minRate, &maxRate), SPA_FORMAT_VIDEO_maxFramerate,
+        SPA_POD_CHOICE_RANGE_Fraction(&capRate, &minRate, &capRate))));
     return params;
 }
 
@@ -257,6 +264,7 @@ struct PipeWireCapturer::Impl {
     bool dmabufFormat = false;
     bool dmabufFailed = false;
     bool explicitSync = false; // buffers come with a SyncTimeline
+    int maxFps = 0;            // the rate the formats were offered with (the frame source's output rate)
     // what the compositor sent in the last 5 s (pipewire thread)
     int64_t statsStartUs = 0;
     int statsBuffers = 0, statsConverted = 0;
@@ -466,6 +474,7 @@ struct PipeWireCapturer::Impl {
         if (!newest) return;
         self->Convert(newest->buffer);
         self->Return(newest);
+        self->UpdateMaxFps();
     }
 
     // Every buffer goes back with its release point signalled (explicit sync), read or not: the producer reuses a
@@ -494,7 +503,20 @@ struct PipeWireCapturer::Impl {
         VV_LOGW("pipewire", "DMA-BUF frames cannot be read, back to shared memory");
         uint8_t buf[1024];
         spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
-        auto params = BuildFormats(&b, nullptr);
+        auto params = BuildFormats(&b, nullptr, maxFps);
+        Pw()->pw_stream_update_params(stream, params.data(), static_cast<uint32_t>(params.size()));
+    }
+
+    // The stream's frame rate changed (Discord set encodingVideoFrameRate): offer the formats again with it
+    void UpdateMaxFps()
+    {
+        int fps = sink->OutputFps();
+        if (fps <= 0 || fps == maxFps) return;
+        VV_LOGI("pipewire", "asking the compositor for at most %d fps (was %d)", fps, maxFps);
+        maxFps = fps;
+        uint8_t buf[8192];
+        spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+        auto params = BuildFormats(&b, dmabufFailed ? nullptr : egl.get(), maxFps);
         Pw()->pw_stream_update_params(stream, params.data(), static_cast<uint32_t>(params.size()));
     }
 
@@ -670,7 +692,8 @@ bool PipeWireCapturer::Start()
     }
     uint8_t buf[8192];
     spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
-    auto params = BuildFormats(&b, m.egl.get());
+    m.maxFps = m.sink->OutputFps();
+    auto params = BuildFormats(&b, m.egl.get(), m.maxFps);
     int rc = pw->pw_stream_connect(m.stream, PW_DIRECTION_INPUT, targetId,
                                    static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
                                    params.data(), static_cast<uint32_t>(params.size()));

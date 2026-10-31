@@ -26,6 +26,7 @@
 #endif
 #include "audio/soundshare.h"
 #include "common/log.h"
+#include "common/platform.h"
 #include "connection/connection.h"
 #include "video/ffmpeg_encoder.h"
 #include "video/frame_source.h"
@@ -586,12 +587,12 @@ void Connection::UpdateVideoSend()
             int w = 0, h = 0;
             for (auto& [ssrc, sub] : s.substreams)
                 if (sub.width * sub.height > w * h) w = sub.width, h = sub.height;
-            VV_LOGI("video", "send: %u frames encoded, %dx%d, %d kbit/s media (target %d), %.0f fps in / %d encoded, source %llu frames, wants %d px, %s%s%s%s",
+            VV_LOGI("video", "send: %u frames encoded, %dx%d, %d kbit/s media (target %d), %.0f fps in / %d encoded, source %llu frames, wants %d px, %s%s%s%s, process memory %d MB, system available %d MB",
                     s.frames_encoded, w, h, s.media_bitrate_bps / 1000, s.target_media_bitrate_bps / 1000, s.input_frame_rate,
                     s.encode_frame_rate, static_cast<unsigned long long>(videoSendSource_ ? videoSendSource_->FramesPushed() : 0),
                     videoSendOptions_.sinkWantsPixels, videoSendOptions_.smooth ? "smooth" : "sharp",
                     s.suspended ? ", SUSPENDED" : "", s.bw_limited_resolution ? ", bw limited" : "",
-                    s.cpu_limited_resolution ? ", cpu limited" : "");
+                    s.cpu_limited_resolution ? ", cpu limited" : "", ProcessMemoryMb(), SystemAvailableMemoryMb());
             return webrtc::TimeDelta::Seconds(5);
         });
         videoSendKey_ = key;

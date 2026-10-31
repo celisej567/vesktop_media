@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <dwmapi.h>
 #include <objbase.h>
 #include <wincodec.h>
 
@@ -9,6 +10,7 @@
 #include <api/video/i420_buffer.h>
 #include <libyuv/convert.h>
 #include <libyuv/scale_argb.h>
+#include <modules/desktop_capture/desktop_and_cursor_composer.h>
 #include <modules/desktop_capture/desktop_capture_options.h>
 #include <modules/desktop_capture/desktop_capturer.h>
 #include <modules/desktop_capture/desktop_frame.h>
@@ -47,17 +49,88 @@ struct ComPtr {
     explicit operator bool() const { return p != nullptr; }
 };
 
-std::unique_ptr<webrtc::DesktopCapturer> CreateCapturer(DesktopCaptureWin::Kind kind, bool forPreview)
+webrtc::DesktopCaptureOptions CaptureOptions(DesktopCaptureWin::Kind kind, bool forPreview)
 {
     auto options = webrtc::DesktopCaptureOptions::CreateDefault();
     options.set_allow_directx_capturer(true);
+    // libwebrtc's GDI capturers would turn off desktop composition (Aero) while they run: Windows 7 then switches the
+    // whole desktop to its basic theme and says so (a no-op since Windows 8)
+    options.set_disable_effects(false);
+    if (kind == DesktopCaptureWin::Kind::Window) {
+        // Windows.Graphics.Capture sees what GDI cannot (GPU-drawn windows: browsers, games, Electron apps). It
+        // shows a yellow border on Windows 10 and needs a moment per window to start, so the thumbnails take GDI's copy
+        options.set_allow_wgc_window_capturer(!forPreview);
+        options.set_allow_wgc_capturer_fallback(true);
+        options.set_allow_cropping_window_capturer(true);
+    }
+    return options;
+}
+
+std::unique_ptr<webrtc::DesktopCapturer> CreateCapturer(DesktopCaptureWin::Kind kind, bool forPreview)
+{
+    auto options = CaptureOptions(kind, forPreview);
     if (kind == DesktopCaptureWin::Kind::Screen) return webrtc::DesktopCapturer::CreateScreenCapturer(options);
-    // Windows.Graphics.Capture sees what GDI cannot (GPU-drawn windows: browsers, games, Electron apps). It shows
-    // a yellow border on Windows 10 and needs a moment per window to start, so the thumbnails take GDI's copy
-    options.set_allow_wgc_window_capturer(!forPreview);
-    options.set_allow_wgc_capturer_fallback(true);
-    options.set_allow_cropping_window_capturer(true);
     return webrtc::DesktopCapturer::CreateWindowCapturer(options);
+}
+
+// The stream's capturer, with the mouse cursor drawn in: DXGI and GDI capture the picture without it (WGC draws it
+// itself and marks its frames, the composer then leaves them alone)
+std::unique_ptr<webrtc::DesktopCapturer> CreateStreamCapturer(DesktopCaptureWin::Kind kind)
+{
+    auto capturer = CreateCapturer(kind, false);
+    if (!capturer) return nullptr;
+    return std::make_unique<webrtc::DesktopAndCursorComposer>(std::move(capturer), CaptureOptions(kind, false));
+}
+
+// Windows 7 (6.1) with desktop composition (Aero) on. From the page the kernel maps into every process
+// (KUSER_SHARED_DATA: NtMajorVersion at 0x26c, NtMinorVersion at 0x270), not from an API a compatibility layer
+// (VxKex) may answer with a newer version
+bool Windows7WithAero()
+{
+    const auto* shared = reinterpret_cast<const volatile uint8_t*>(0x7ffe0000);
+    ULONG major = *reinterpret_cast<const volatile ULONG*>(shared + 0x26c);
+    ULONG minor = *reinterpret_cast<const volatile ULONG*>(shared + 0x270);
+    BOOL composition = FALSE;
+    return major == 6 && minor <= 1 && SUCCEEDED(DwmIsCompositionEnabled(&composition)) && composition;
+}
+
+// A window's picture as it last drew itself, for its thumbnail: with desktop composition each window draws into a
+// buffer of its own, which BitBlt from its DC copies even when other windows cover it. Windows 7 only:
+// libwebrtc's window capturer takes each window's first frame with PrintWindow, which there makes the window redraw
+// its frame in the classic style (every title bar flickers on each refresh of the previews); since Windows 8
+// PrintWindow does not, and BitBlt would miss GPU-drawn windows
+std::unique_ptr<webrtc::DesktopFrame> CaptureWindowDc(HWND window)
+{
+    RECT rect{};
+    if (IsIconic(window) || !GetWindowRect(window, &rect)) return nullptr;
+    int w = rect.right - rect.left, h = rect.bottom - rect.top;
+    if (w <= 0 || h <= 0) return nullptr;
+    HDC source = GetWindowDC(window);
+    if (!source) return nullptr;
+    HDC memory = CreateCompatibleDC(source);
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = w;
+    info.bmiHeader.biHeight = -h; // top-down
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP bitmap = memory ? CreateDIBSection(memory, &info, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
+    std::unique_ptr<webrtc::DesktopFrame> frame;
+    if (bitmap) {
+        HGDIOBJ previous = SelectObject(memory, bitmap);
+        if (BitBlt(memory, 0, 0, w, h, source, 0, 0, SRCCOPY)) {
+            GdiFlush();
+            frame = std::make_unique<webrtc::BasicDesktopFrame>(webrtc::DesktopSize(w, h));
+            frame->CopyPixelsFrom(static_cast<const uint8_t*>(bits), w * 4, webrtc::DesktopRect::MakeWH(w, h));
+        }
+        SelectObject(memory, previous);
+        DeleteObject(bitmap);
+    }
+    if (memory) DeleteDC(memory);
+    ReleaseDC(window, source);
+    return frame;
 }
 
 // Delivers CaptureFrame()'s result to whoever waits on it (the capturers call back from CaptureFrame itself)
@@ -144,10 +217,15 @@ json DesktopPreviews(bool windows, int width, int height)
     capturer->Start(&callback);
     webrtc::DesktopCapturer::SourceList sources;
     if (!capturer->GetSourceList(&sources)) return list;
+    const bool windowDc = windows && Windows7WithAero();
     for (auto& source : sources) {
         std::string url;
-        if (capturer->SelectSource(source.id))
+        if (windowDc) {
+            if (auto frame = CaptureWindowDc(reinterpret_cast<HWND>(static_cast<intptr_t>(source.id))))
+                url = Thumbnail(*frame, width, height);
+        } else if (capturer->SelectSource(source.id)) {
             if (auto frame = CaptureOne(*capturer, callback)) url = Thumbnail(*frame, width, height);
+        }
         // a window that shows nothing (minimized, cloaked) is still offered: Electron's picker does too
         std::string id = std::string(windows ? "window:" : "screen:") + std::to_string(source.id) + ":0";
         list.push_back({{"id", id}, {"name", source.title}, {"url", url}});
@@ -213,7 +291,7 @@ void DesktopCaptureWin::Loop(std::shared_ptr<std::atomic<int>> started)
 {
     ComScope com;
     SetThreadDescription(GetCurrentThread(), L"vv desktop capture");
-    auto capturer = CreateCapturer(kind_, false);
+    auto capturer = CreateStreamCapturer(kind_);
     FrameCallback callback;
     if (capturer) capturer->Start(&callback);
     if (!capturer || !capturer->SelectSource(static_cast<webrtc::DesktopCapturer::SourceId>(id_))) {

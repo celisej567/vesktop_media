@@ -15,8 +15,9 @@ namespace vv {
 // Electron's libffmpeg)
 void* OpenLibrary(std::initializer_list<const char*> names, bool isolated = false);
 // Like OpenLibrary, but only from the directory of vesktop_media.node: never the system's copy. For the libraries
-// that ship with the module (noise suppression). `path`, if given, gets the file that was loaded
-void* OpenLocalLibrary(const char* name, std::string* path = nullptr);
+// that ship with the module (noise suppression). `path`, if given, gets the file that was loaded; `error`, why
+// nothing was ("not found next to the module", or the loader's reason)
+void* OpenLocalLibrary(const char* name, std::string* path = nullptr, std::string* error = nullptr);
 // A library already loaded into the process, or null (never loads anything)
 void* LoadedLibrary(const char* name);
 void* LibrarySymbol(void* library, const char* name);
@@ -38,6 +39,10 @@ std::filesystem::path PathFromUtf8(const std::string& utf8);
 std::string PathToUtf8(const std::filesystem::path& path);
 // fopen with a UTF-8 path
 FILE* OpenFile(const std::string& utf8Path, const char* mode);
+// The process' resident memory in MB (Linux: RSS; Windows: working set), -1 when unknown
+int ProcessMemoryMb();
+// The memory the whole system still has for new allocations in MB (Linux: MemAvailable), -1 when unknown
+int SystemAvailableMemoryMb();
 
 // File names of the libraries that ship next to the module
 #ifdef _WIN32

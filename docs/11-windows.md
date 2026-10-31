@@ -3,7 +3,7 @@
 The module builds and runs on Windows 10 (version 2004 or newer) and 11, x86-64. The engine, the connection, DAVE,
 video send and receive are the same code as on Linux; what differs is the build, the loading of libraries and the
 capture backends. Platform code is in files of its own (`*_win.cc`, the Linux ones next to them) or behind `_WIN32`
-where only a few lines differ. Windows 7 / 8 are not possible: current Electron and libwebrtc M156 need Windows 10.
+where only a few lines differ. Windows 7 / 8 are not supported: current Electron and libwebrtc M156 need Windows 10.
 
 ## Build
 
@@ -35,11 +35,12 @@ environment itself (`vcvars64.bat` of the newest Visual Studio) and puts LLVM ah
 ## Libraries next to the module
 
 `common/platform_win.cc`: `LoadLibraryExW` with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR`, so a DLL next to the module finds
-its own dependencies there and never a copy elsewhere on PATH. Paths are UTF-8 in our code and UTF-16 at every Win32
+its own dependencies there and never a copy elsewhere on PATH. A library that is there but does not load is logged
+with the loader's reason. Paths are UTF-8 in our code and UTF-16 at every Win32
 call (`Widen` / `Narrow`, `PathFromUtf8`, `OpenFile`): the user's profile directory, where Vesktop lives, is often not
 ASCII. There is no `RTLD_DEEPBIND` and no need for it: a DLL's imports bind to the DLL they name.
 
-* **FFmpeg**: `scripts/build-ffmpeg.ps1` takes a pinned GPL shared build by BtbN (FFmpeg 8.1 with x264, x265 and NVENC,
+* **FFmpeg**: `scripts/build-ffmpeg.ps1` takes a pinned GPL shared build by BtbN (FFmpeg 8.1 with x264, x265, NVENC and AMF,
   checked against its SHA-256) and ships `avcodec-62.dll`, `avutil-60.dll`, `swresample-6.dll`. The module loads
   `avcodec-NN.dll` from its own directory only; Electron's `ffmpeg.dll` (H.264 decoding only) is the fallback for
   decoding. The full build is large (avcodec is ~115 MB); a cut-down build like Linux' needs MSYS2 and is not set up.
@@ -121,4 +122,4 @@ with a silent virtual sound card (QEMU `intel-hda` with `audiodev none`).
 ## Not verified
 
 The Go Live modal and the stream settings in Vesktop's UI on Windows (needs a Discord login); real cameras and real
-microphones; NVENC (needs an NVIDIA GPU); several screens; HDR.
+microphones; NVENC (needs an NVIDIA GPU); AMF (needs an AMD GPU); several screens; HDR.

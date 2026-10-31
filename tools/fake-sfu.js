@@ -83,6 +83,8 @@ let soundshareOk = true;
 // passes them (--screen screen:0 captures the first screen)
 if (SCREEN_NODE && process.platform !== "win32") process.env.VESKTOP_MEDIA_PIPEWIRE_NODE = SCREEN_NODE;
 const CLIP_DIR = opt("--clip-dir");
+// --dump-frame <file>: the last frame out of the video sink as a binary PPM (to look at, e.g. the cursor in a screen)
+const DUMP_FRAME = opt("--dump-frame");
 // DAVE epoch 1 + transition 0 without an MLS group: DAVE turns off, which once deadlocked the JS thread
 const DAVE_RESET = args.includes("--dave-reset");
 // --late-join: the clip has a single key frame and streaming starts after it, as if we joined mid-stream;
@@ -398,6 +400,7 @@ sock.bind(0, "127.0.0.1", () => {
                     if (userId !== "222" || !ssrc || !streamId || !(RECV_VIDEO || LOOP_VIDEO)) return;
                     voice.setVideoOutputSink(streamId, image => {
                         video.frames++;
+                        if (DUMP_FRAME) video.last = { width: image.width, height: image.height, data: Buffer.from(image.data) };
                         video.size = `${image.width}x${image.height}`;
                         // the test pattern is colourful: some pixel must be far from black
                         for (let p = 0; p < image.data.length && !video.nonBlack; p += 4 * 97)
@@ -523,6 +526,12 @@ sock.bind(0, "127.0.0.1", () => {
                             const v = s.inbound?.find(u => u.id === "222")?.videos?.[0];
                             log("inbound video from 222:", v ? JSON.stringify({ ssrc: v.ssrc, codec: v.codecName, decoder: v.decoderImplementationName, framesDecoded: v.framesDecoded, width: v.width, height: v.height, packets: v.rtpStats?.packets }) : "none");
                             log("video sink:", JSON.stringify({ frames: video.frames, size: video.size, nonBlack: video.nonBlack, firstFrame: video.firstFrame }));
+                            if (DUMP_FRAME && video.last) {
+                                const { width, height, data } = video.last;
+                                const rgb = Buffer.alloc(width * height * 3);
+                                for (let i = 0, o = 0; i < width * height * 4; i += 4, o += 3) data.copy(rgb, o, i, i + 3);
+                                fs.writeFileSync(DUMP_FRAME, Buffer.concat([Buffer.from(`P6 ${width} ${height} 255\n`), rgb]));
+                            }
                             const size = LOOP_VIDEO ? (LAYERS > 1 ? "640x360" : "1280x720") : "320x240";
                             // a screen or window keeps its size and aspect ratio, scaled down into 1280x720 when larger
                             const fitted = sz => {

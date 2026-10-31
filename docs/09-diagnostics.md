@@ -8,6 +8,31 @@
 warnings and errors appear under `webrtc`; Vesktop's renderer adds its Go Live trace lines under the area `js`,
 prefixed `[Vesktop]` (`consoleLog`).
 
+### Crashes
+
+On Linux the module catches the signals of a crash (`common/crash_handler_linux.cc`: SIGSEGV, SIGBUS, SIGILL,
+SIGFPE, SIGABRT, SIGTRAP), in any thread of the process, and writes them to the log with `write(2)` only:
+
+```
+[crash] SIGSEGV (code 1) at address 0x0, thread 391905 "Voice", vesktop_media.node build id 14b7277a…
+[crash] instruction vesktop_media.node+0xb79e0
+[crash]   #0 vesktop_media.node+0x115de9
+…
+```
+
+then hands the signal to the handler before it (Chromium's crashpad, or the default action: a core dump, which
+`coredumpctl` shows on most distributions). The offsets are into the build named by the build id, which the log also
+gives at `initialize` (`engine: vesktop_media.node build id …`); `llvm-symbolizer --obj=vesktop_media.node 0x<offset>`
+names the functions with that same file (it keeps its symbol table). Vesktop adds the line
+`vesktop: window process gone: <reason>, exit code <n>` when the window's process ends (`killed, exit code 9` is a
+SIGKILL, which no handler sees: an out-of-memory killer (the kernel's, systemd-oomd, or one like earlyoom / nohang,
+which logs only to its own journal unit and picks the process with the highest `oom_score_adj`: Chromium raises it
+for page processes, so the window's is the first victim even when something else used the memory; the log gives it
+at `initialize`), or Chromium's browser process, which writes why only to its own output. The `process memory` and
+`system available` at the end of the `video: send:` lines show how the memory went), and keeps Electron's
+minidumps in `~/.config/vesktop/Crashpad` (`crashReporter`, nothing is uploaded). `scripts/test.sh` checks the handler
+(`VESKTOP_MEDIA_TEST_CRASH=1` crashes the worker 1 s after `initialize`, `tools/crash.js`).
+
 ### Lines worth knowing
 
 | Line | Meaning |
@@ -27,8 +52,10 @@ prefixed `[Vesktop]` (`consoleLog`).
 | `conn: SFU REMB (stream): 4200 kbit/s` | the server's limit for what we send, when it changes |
 | `video: video send stream: H265 (hevc_nvenc) pt 101 rtx 102, 1 layers, ssrc …, screen (smooth)` | the codec, the encoder in brackets (`libvpx`, `libx264`, `libx265`, `h264_nvenc`, `hevc_nvenc`), what is sent |
 | `video: layer: max … kbit/s, encoder active` / `idle until viewers ask for pixels` | the plan of each layer |
-| `video: send: N frames encoded, 1920x1080, M kbit/s media (target T), X fps in / Y encoded, source S frames, wants P px, smooth[, SUSPENDED][, bw limited][, cpu limited]` | every 5 s while sending: the actual encoder resolution, bitrate and frame rate, and why it is limited |
+| `video: send: N frames encoded, 1920x1080, M kbit/s media (target T), X fps in / Y encoded, source S frames, wants P px, smooth[, SUSPENDED][, bw limited][, cpu limited], process memory R MB` | every 5 s while sending: the actual encoder resolution, bitrate and frame rate, why it is limited, and the process' resident memory |
 | `video: encoder h264_nvenc (libvesktop_ffmpeg.so (bundled)): available` / `not available` | the result of probing an encoder |
+| `ffmpeg: [h264_vaapi @ 0x…] …` | FFmpeg's own warnings and errors (and libva's, AMF's, x264's, x265's through it): why an encoder does not open or fails. A line repeated right away is counted, at most 500 a process |
+| `video: h264_vaapi: VA-API driver on /dev/dri/renderD128: <vendor>` / `does not open at WxH (<error>)` | the VA driver in use (e.g. Mesa's radeonsi), and an encoder that did not open |
 | `video: ffmpeg … (avcodec …): h264=1 h265=1` | which FFmpeg decodes what |
 | `video: waiting for a frame from <user> ssrc …: packets, pt, frames key / delta, decoded` | a remote video that shows nothing yet (key frame watchdog) |
 | `portal: Portal picker: node_id=…, source type 2, app <desktop file>` | what the system picker returned |

@@ -25,9 +25,10 @@ const Api* GetApi()
     static Api api = [] {
         Api a;
         std::string path;
-        void* h = OpenLocalLibrary(VV_LOCAL_LIBRARY("deepfilter"), &path);
+        std::string error;
+        void* h = OpenLocalLibrary(VV_LOCAL_LIBRARY("deepfilter"), &path, &error);
         if (!h) {
-            VV_LOGW("deepfilter", VV_LOCAL_LIBRARY("deepfilter") " not found next to the module");
+            VV_LOGW("deepfilter", VV_LOCAL_LIBRARY("deepfilter") " %s", error.c_str());
             return a;
         }
         a.create = reinterpret_cast<void* (*)(const char*, float)>(LibrarySymbol(h, "df_create"));

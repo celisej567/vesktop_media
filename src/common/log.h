@@ -21,6 +21,8 @@ void Log(LogLevel level, const char* tag, const char* fmt, ...);
 void LogV(LogLevel level, const char* tag, const char* fmt, va_list args);
 // Log lines coming from JS (consoleLog)
 void LogRaw(const std::string& level, const std::string& message);
+// The log file's descriptor, -1 when there is none (for the crash handler: write(2) only)
+int LogFileDescriptor();
 
 } // namespace vv
 

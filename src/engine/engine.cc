@@ -6,6 +6,7 @@
 #include <api/environment/environment_factory.h>
 #include <api/field_trials.h>
 #include <api/make_ref_counted.h>
+#include <api/task_queue/default_task_queue_factory.h>
 #include <api/units/time_delta.h>
 #include <audio/audio_transport_impl.h>
 #include <call/audio_sender.h>
@@ -16,6 +17,10 @@
 
 #include <algorithm>
 #include <cmath>
+#ifndef _WIN32
+#include <pthread.h>
+#include <sched.h>
+#endif
 #include <cstring>
 #include <filesystem>
 
@@ -24,6 +29,9 @@
 #include "audio/rnnoise.h"
 #include "capture/camera.h"
 #include "video/video_sinks.h"
+#ifndef _WIN32
+#include "common/crash_handler.h"
+#endif
 #ifdef _WIN32
 #include "common/watchdog_win.h"
 #endif
@@ -46,6 +54,35 @@ namespace {
 
 // How long the mic test is silenced after the processing changed, in 10 ms frames
 constexpr int kSettleFrames = 35;
+
+// libwebrtc's task queues at normal priority. Its own factory runs them (video encoding and decoding, audio encoding,
+// incoming video) at realtime priority, SCHED_FIFO 96-97 on Linux when the user may (rtprio, e.g. the audio group)
+// and TIME_CRITICAL on Windows; Chromium never does. A software encoder (x264 / x265
+// at 1080p60, its threads inherit the policy) then keeps realtime threads busy for long stretches: they starve the
+// rest of the desktop, and with an RLIMIT_RTTIME on the process (set when PipeWire gets realtime from RTKit) the
+// kernel kills it with SIGKILL, without a trace. The audio device's own threads keep their priority
+class NormalPriorityTaskQueueFactory : public webrtc::TaskQueueFactory {
+public:
+    explicit NormalPriorityTaskQueueFactory(std::unique_ptr<webrtc::TaskQueueFactory> base) : base_(std::move(base)) {}
+    std::unique_ptr<webrtc::TaskQueueBase, webrtc::TaskQueueDeleter> CreateTaskQueue(absl::string_view name, Priority priority) const override
+    {
+        auto queue = base_->CreateTaskQueue(name, Priority::kNormal);
+        // the queue's first task: libwebrtc's threads set a realtime policy for every priority on Linux (SCHED_FIFO
+        // even for "normal"), so put the thread back on the ordinary scheduler (lowering never needs a permission)
+        queue->PostTask([] {
+#ifdef _WIN32
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+#else
+            sched_param param{};
+            pthread_setschedparam(pthread_self(), SCHED_OTHER, &param);
+#endif
+        });
+        return queue;
+    }
+
+private:
+    std::unique_ptr<webrtc::TaskQueueFactory> base_;
+};
 
 // Field trials Discord's clients run with
 constexpr char kFieldTrials[] =
@@ -141,8 +178,22 @@ void Engine::Initialize(const json& options)
     VideoSinks::Get().SetObserver([](const std::string& streamId, bool attached) { Camera::Get().OnPreviewSinkChanged(streamId, attached); });
     Camera::Get().Refresh(); // first enumeration, on the camera thread
     VV_LOGI("engine", "initialize: %s", options.dump().c_str());
+#ifndef _WIN32
+    VV_LOGI("engine", "vesktop_media.node build id %s (crash reports give offsets into this build)", ModuleBuildId());
+    VV_LOGI("engine", "process limits: %s", RealtimeLimits().c_str());
+    // what an out of memory killer would pick: Chromium raises it for page processes (higher = killed first)
+    if (FILE* f = fopen("/proc/self/oom_score_adj", "r")) {
+        int adj = 0;
+        if (fscanf(f, "%d", &adj) == 1) VV_LOGI("engine", "oom_score_adj %d, system available memory %d MB", adj, SystemAvailableMemoryMb());
+        fclose(f);
+    }
+#endif
 
-    env_ = std::make_unique<webrtc::Environment>(webrtc::CreateEnvironment(webrtc::FieldTrials::Create(kFieldTrials)));
+    {
+        auto fieldTrials = webrtc::FieldTrials::Create(kFieldTrials);
+        auto taskQueues = std::make_unique<NormalPriorityTaskQueueFactory>(webrtc::CreateDefaultTaskQueueFactory(fieldTrials.get()));
+        env_ = std::make_unique<webrtc::Environment>(webrtc::CreateEnvironment(std::move(fieldTrials), std::move(taskQueues)));
+    }
     worker_ = webrtc::Thread::Create();
     worker_->SetName("Voice", nullptr);
     worker_->Start();
@@ -152,6 +203,14 @@ void Engine::Initialize(const json& options)
     if (int ms = atoi(getenv("VESKTOP_MEDIA_TEST_STALL_WORKER") ? getenv("VESKTOP_MEDIA_TEST_STALL_WORKER") : "0"); ms > 0)
         worker_->PostDelayedTask([ms] { Sleep(ms); }, webrtc::TimeDelta::Seconds(3));
 #endif
+    // VESKTOP_MEDIA_TEST_CRASH=1: the worker crashes 1 s after initialize (tests the crash handler, scripts/test.sh)
+    if (getenv("VESKTOP_MEDIA_TEST_CRASH"))
+        worker_->PostDelayedTask(
+            [] {
+                volatile int* nowhere = nullptr;
+                *nowhere = 1;
+            },
+            webrtc::TimeDelta::Seconds(1));
 
     vad_ = WebRtcVad_Create();
     WebRtcVad_Init(static_cast<WebRtcVadInst*>(vad_));

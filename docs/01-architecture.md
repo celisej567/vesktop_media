@@ -85,12 +85,24 @@ A connection's `context` comes from its options:
 | network thread, one per connection | `Connection` constructor | `NetworkLoop`: polls the socket every 10 ms, IP discovery, keepalive pings, transport decryption; posts RTP / RTCP to the worker |
 | audio device threads | libwebrtc's PulseAudio module | capture → `CaptureAdm` (gain, RNNoise or DeepFilterNet) → APM → `CaptureTap` → `Engine::OnProcessedCapture` → every connection's send gate; playout → `Mixer::Mix`, then the mic test's loopback is added in `CaptureAdm::NeedMorePlayData` |
 | DeepFilterNet creator, one per microphone channel | `DeepFilter` constructor | loading the model (about 0.1 s) without holding the audio thread; freeing an old state also happens on a short-lived thread |
-| libwebrtc's own task queues | `webrtc::Call` | encoding, pacing, RTCP |
+| libwebrtc's own task queues | `webrtc::Call` | encoding, pacing, RTCP; at normal priority (below) |
 | camera thread | `Camera` | everything that touches a V4L2 device (enumeration, start, stop, autofocus) |
 | portal thread, one per picker | `ScreenCastPortal::Present` | the D-Bus requests of a pick, with its own `GMainContext` |
 | `vv-pipewire` loop + repeater, per capture | `PipeWireCapturer::Start` | PipeWire events and frame conversion; re-sending the last frame of a still screen |
 | PulseAudio loop + mixing thread | `Soundshare` | sink input discovery and monitor streams; a 10 ms clock that mixes them |
 | fake camera / fake audio threads | tests only | synthetic frames on their own clocks |
+
+**Thread priorities.** libwebrtc's task queue threads set a realtime policy for every priority on Linux
+(SCHED_FIFO, 96-97 for the encoder, decoder and audio encoder queues, about 49 even for "normal") when the process
+may (an rtprio limit, e.g. the audio group), and TIME_CRITICAL on Windows. A software encoder at 1080p60 (x264 /
+x265, whose threads inherit the policy) then keeps realtime threads busy: they starve the desktop, and with an
+`RLIMIT_RTTIME` on the process (set when PipeWire gets realtime from RTKit) the kernel kills it with SIGKILL, which
+leaves no trace. The engine's `NormalPriorityTaskQueueFactory` (`engine/engine.cc`) creates every queue at normal
+priority and makes the queue's first task put its thread back on the ordinary scheduler (SCHED_OTHER /
+THREAD_PRIORITY_NORMAL), as Chromium runs WebRTC. The audio device threads keep their realtime priority (short,
+blocking work). The log gives the process' realtime limits at `initialize` (`engine: process limits: …`), and a
+SIGXCPU (a realtime thread past the soft `RLIMIT_RTTIME`) becomes a `[crash] SIGXCPU` line instead of ending the
+process.
 
 The rule that keeps this safe: **nothing but the JS thread touches V8**. Results of other threads go through
 `JsCallback::Call(builder)`: the builder lambda runs later on the JS thread and creates the N-API values there. The

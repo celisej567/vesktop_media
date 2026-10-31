@@ -13,7 +13,8 @@ case $MODULE in /*) ;; *) MODULE=$PWD/$MODULE ;; esac
 WORK=$(mktemp -d)
 SINK=
 GST=
-trap 'rm -rf "$WORK"; [ -n "$SINK" ] && pactl unload-module "$SINK"; [ -n "$GST" ] && kill $GST 2> /dev/null' EXIT
+# (a gst already gone is no failure: under set -e a failing kill here would become the script's status)
+trap 'rm -rf "$WORK"; [ -n "$SINK" ] && pactl unload-module "$SINK"; [ -z "$GST" ] || kill $GST 2> /dev/null || true' EXIT
 # check <grep pattern> <fake-sfu args>: prints the matching lines, fails when fake-sfu reports a failure
 check() {
     pattern=$1
@@ -37,6 +38,13 @@ ELECTRON_RUN_AS_NODE=1 timeout 20 "$ELECTRON" tools/exit-with-connection.js "$MO
 echo "== two environments in one process: the callbacks of one go on after the other one ended (a page loaded again)"
 mkdir -p "$WORK/two"
 ELECTRON_RUN_AS_NODE=1 timeout 30 "$ELECTRON" tools/two-environments.js "$MODULE" "$WORK/two" > /dev/null 2>&1 || { echo "FAILED (two environments)"; exit 1; }
+echo "== a crash writes its signal and call stack to the log, then goes on to the default action"
+mkdir -p "$WORK/crash"
+status=0
+(ulimit -c 0; VESKTOP_MEDIA_TEST_CRASH=1 ELECTRON_RUN_AS_NODE=1 exec timeout 20 "$ELECTRON" tools/crash.js "$MODULE" "$WORK/crash") > /dev/null 2>&1 || status=$?  # no core dump
+grep -E "\[crash\]" "$WORK/crash/vesktop_media.log" | head -4
+[ $status -eq 139 ] && grep -q "\[crash\] SIGSEGV" "$WORK/crash/vesktop_media.log" && grep -q "\[crash\]   #1 " "$WORK/crash/vesktop_media.log" ||
+    { echo "FAILED (crash handler, exit $status)"; exit 1; }
 echo "== speaking"
 check "onConnect|inbound|summary" --seconds 4
 # the reflected audio (user 222) must be reported as speaking: Discord's client shows who speaks from that callback

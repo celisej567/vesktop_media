@@ -3,6 +3,7 @@
 #include "common/platform.h"
 
 #include <windows.h>
+#include <psapi.h>
 
 #include <filesystem>
 
@@ -89,15 +90,28 @@ void* OpenLibrary(std::initializer_list<const char*> names, bool)
     return nullptr;
 }
 
-void* OpenLocalLibrary(const char* name, std::string* path)
+void* OpenLocalLibrary(const char* name, std::string* path, std::string* error)
 {
     auto dir = ModuleDirectory();
-    if (dir.empty()) return nullptr;
     auto local = std::filesystem::path(Widen(dir)) / Widen(name);
     std::error_code ec;
-    if (!std::filesystem::exists(local, ec)) return nullptr;
+    if (dir.empty() || !std::filesystem::exists(local, ec)) {
+        if (error) *error = "not found next to the module";
+        return nullptr;
+    }
     HMODULE h = LoadFile(local.wstring());
     if (h && path) *path = Narrow(local.wstring());
+    if (!h && error) {
+        // e.g. 126 / 127: a DLL or function it imports is missing
+        DWORD code = GetLastError();
+        wchar_t* text = nullptr;
+        FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
+                       code, MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), reinterpret_cast<LPWSTR>(&text), 0, nullptr);
+        std::string reason = text ? Narrow(text) : "";
+        if (text) LocalFree(text);
+        while (!reason.empty() && (reason.back() == '\n' || reason.back() == '\r' || reason.back() == ' ')) reason.pop_back();
+        *error = "cannot be loaded: " + reason + " (error " + std::to_string(code) + ")";
+    }
     return h;
 }
 
@@ -120,6 +134,22 @@ void CloseLibrary(void* library)
 void* HostSymbol(const char* name)
 {
     return reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(nullptr), name));
+}
+
+int ProcessMemoryMb()
+{
+    PROCESS_MEMORY_COUNTERS counters{};
+    counters.cb = sizeof(counters);
+    if (!K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters))) return -1;
+    return static_cast<int>(counters.WorkingSetSize / (1024 * 1024));
+}
+
+int SystemAvailableMemoryMb()
+{
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (!GlobalMemoryStatusEx(&status)) return -1;
+    return static_cast<int>(status.ullAvailPhys / (1024 * 1024));
 }
 
 } // namespace vv
