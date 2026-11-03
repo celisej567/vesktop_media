@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "common/log.h"
+#include "common/platform.h"
 
 namespace vv {
 
@@ -82,16 +83,11 @@ std::unique_ptr<webrtc::DesktopCapturer> CreateStreamCapturer(DesktopCaptureWin:
     return std::make_unique<webrtc::DesktopAndCursorComposer>(std::move(capturer), CaptureOptions(kind, false));
 }
 
-// Windows 7 (6.1) with desktop composition (Aero) on. From the page the kernel maps into every process
-// (KUSER_SHARED_DATA: NtMajorVersion at 0x26c, NtMinorVersion at 0x270), not from an API a compatibility layer
-// (VxKex) may answer with a newer version
+// Windows 7 with desktop composition (Aero) on
 bool Windows7WithAero()
 {
-    const auto* shared = reinterpret_cast<const volatile uint8_t*>(0x7ffe0000);
-    ULONG major = *reinterpret_cast<const volatile ULONG*>(shared + 0x26c);
-    ULONG minor = *reinterpret_cast<const volatile ULONG*>(shared + 0x270);
     BOOL composition = FALSE;
-    return major == 6 && minor <= 1 && SUCCEEDED(DwmIsCompositionEnabled(&composition)) && composition;
+    return Windows7() && SUCCEEDED(DwmIsCompositionEnabled(&composition)) && composition;
 }
 
 // A window's picture as it last drew itself, for its thumbnail: with desktop composition each window draws into a

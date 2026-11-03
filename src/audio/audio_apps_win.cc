@@ -65,11 +65,42 @@ std::set<DWORD> OwnProcesses()
     return own;
 }
 
+// PKEY_DeviceInterface_FriendlyName (functiondiscoverykeys_devpkey.h), the name of an endpoint's device
+constexpr PROPERTYKEY kDeviceInterfaceName = {{0x026e516e, 0xb814, 0x414b, {0x83, 0xcd, 0x85, 0x6d, 0x6f, 0xef, 0x48, 0x22}}, 2};
+
+// The active endpoint of VB-CABLE for `flow`, by the name of its device ("VB-Audio Virtual Cable"): the endpoints'
+// own names ("CABLE Input", "CABLE Output") can be renamed in the sound settings
+std::wstring CableEndpoint(IMMDeviceEnumerator* enumerator, EDataFlow flow)
+{
+    ComPtr<IMMDeviceCollection> devices;
+    UINT count = 0;
+    if (FAILED(enumerator->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, &devices)) || FAILED(devices->GetCount(&count)))
+        return L"";
+    for (UINT i = 0; i < count; i++) {
+        ComPtr<IMMDevice> device;
+        ComPtr<IPropertyStore> properties;
+        PROPVARIANT name;
+        PropVariantInit(&name);
+        if (FAILED(devices->Item(i, &device)) || FAILED(device->OpenPropertyStore(STGM_READ, &properties)) ||
+            FAILED(properties->GetValue(kDeviceInterfaceName, &name)))
+            continue;
+        bool cable = name.vt == VT_LPWSTR && wcsstr(name.pwszVal, L"VB-Audio Virtual Cable");
+        PropVariantClear(&name);
+        LPWSTR id = nullptr;
+        if (!cable || FAILED(device->GetId(&id))) continue;
+        std::wstring result = id;
+        CoTaskMemFree(id);
+        return result;
+    }
+    return L"";
+}
+
 } // namespace
 
 json ListAudioApps()
 {
     json list = json::array();
+    if (Windows7()) return list; // nothing to pick: see SoundshareCable
     HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     {
         ComPtr<IMMDeviceEnumerator> enumerator;
@@ -107,11 +138,42 @@ json ListAudioApps()
 
 json WindowAudioApp(int64_t window)
 {
+    if (Windows7()) return nullptr;
     DWORD pid = 0;
     HWND hwnd = reinterpret_cast<HWND>(static_cast<intptr_t>(window));
     if (!IsWindow(hwnd) || !GetWindowThreadProcessId(hwnd, &pid) || !pid) return nullptr;
     auto name = ProcessName(pid);
     return {{"name", name.empty() ? std::to_string(pid) : name}, {"pid", pid}};
+}
+
+json SoundshareCable()
+{
+    if (!Windows7()) return nullptr;
+    json result = {{"installed", false}, {"isDefault", false}};
+    HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    {
+        ComPtr<IMMDeviceEnumerator> enumerator;
+        ComPtr<IMMDevice> output;
+        LPWSTR id = nullptr;
+        if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator)))) {
+            result["installed"] = !CableEndpoint(enumerator.p, eCapture).empty();
+            auto input = CableEndpoint(enumerator.p, eRender);
+            if (!input.empty() && SUCCEEDED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &output)) &&
+                SUCCEEDED(output->GetId(&id))) {
+                result["isDefault"] = input == id;
+                CoTaskMemFree(id);
+            }
+        }
+    }
+    if (SUCCEEDED(init)) CoUninitialize();
+    return result;
+}
+
+std::string CableRecordingId()
+{
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator)))) return "";
+    return Narrow(CableEndpoint(enumerator.p, eCapture));
 }
 
 } // namespace vv

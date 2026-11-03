@@ -4,6 +4,7 @@ The module builds and runs on Windows 10 (version 2004 or newer) and 11, x86-64.
 video send and receive are the same code as on Linux; what differs is the build, the loading of libraries and the
 capture backends. Platform code is in files of its own (`*_win.cc`, the Linux ones next to them) or behind `_WIN32`
 where only a few lines differ. Windows 7 / 8 are not supported: current Electron and libwebrtc M156 need Windows 10.
+The same build runs on Windows 7 under VxKex, experimentally: [12](12-windows7.md).
 
 ## Build
 
@@ -66,6 +67,8 @@ source has a capture thread; one mixer makes the 10 ms, 48 kHz stereo frames, as
 The stream settings' audio choice lists the processes with an audio session on the default output
 (`vesktopListAudioApps`, `audio/audio_apps_win.cc`) and preselects the process that owns the streamed window
 (`vesktopWindowAudioApp`); on Linux both come from Vesktop's main process (PipeWire).
+
+Windows 7 has no process loopback: there the stream records VB-CABLE instead ([12](12-windows7.md)).
 
 ## Screens and windows
 

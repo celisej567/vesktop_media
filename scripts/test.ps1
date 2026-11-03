@@ -51,6 +51,13 @@ try {
     Remove-Item env:VESKTOP_MEDIA_FAKE_MIC
     Get-Content "$Work\noise\out" | ForEach-Object { Write-Host $_ }
     if ($status -ne 0) { Write-Host 'FAILED (noise models)'; exit 1 }
+    Write-Host '== noise models with a 44.1 kHz microphone (Windows records at the device''s rate)'
+    $env:VESKTOP_MEDIA_FAKE_MIC = 'speech'
+    $env:VESKTOP_MEDIA_FAKE_MIC_RATE = '44100'
+    $status = Invoke-Tool "$Work\noise44" 60 @("`"$Tools\noise-models.js`"", "`"$Module`"", "`"$Work\noise44`"")
+    Remove-Item env:VESKTOP_MEDIA_FAKE_MIC, env:VESKTOP_MEDIA_FAKE_MIC_RATE
+    Get-Content "$Work\noise44\out" | ForEach-Object { Write-Host $_ }
+    if ($status -ne 0) { Write-Host 'FAILED (noise models at 44.1 kHz)'; exit 1 }
 
     Write-Host '== speaking'
     $out = Check 'onConnect|inbound|summary' @('--seconds', '4')

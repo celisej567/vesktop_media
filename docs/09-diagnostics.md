@@ -89,7 +89,8 @@ Options: `--seconds`, `--vad <dB>`, `--video VP8|H264|H265`, `--recv-video`, `--
 `--wants-late`, `--js-inactive`, `--switch-camera`, `--golive-camera`, `--screen <node>`, `--expect-source-end`, `--soundshare <pid>`,
 `--video-bitrate <bps>`, `--dave-reset`, `--real-audio`, `--trace`, `--clip-dir <dir>`. Environment of the module for tests:
 `VESKTOP_MEDIA_PIPEWIRE_NODE`, `VESKTOP_MEDIA_ENCODER`, `VESKTOP_MEDIA_LOG_STDERR`, and for the fake microphone
-`VESKTOP_MEDIA_FAKE_MIC=speech` (noise floor and voiced bursts) or `file:<48 kHz mono 16-bit WAV>` (looped).
+`VESKTOP_MEDIA_FAKE_MIC=speech` (noise floor and voiced bursts) or `file:<mono 16-bit WAV>` (looped, at the capture
+rate), and `VESKTOP_MEDIA_FAKE_MIC_RATE` (its capture rate, 48000 by default).
 
 `tools/noise-models.js` checks the noise models (below).
 
@@ -100,7 +101,8 @@ Runs against `build/out/vesktop_media.node`:
 | Case | Guards against |
 |---|---|
 | undefined symbols | a dependency that would only fail when its code path runs ([02](02-build.md)) |
-| noise models (`tools/noise-models.js`) | the extension: RNNoise by default, DeepFilterNet runs and its state is created, Standard is libwebrtc's suppression, nothing runs with the flag off |
+| noise models (`tools/noise-models.js`) | the extension: RNNoise by default and it processes frames, DeepFilterNet runs and its state is created, Standard is libwebrtc's suppression, nothing runs with the flag off |
+| noise models at 44.1 kHz (`VESKTOP_MEDIA_FAKE_MIC_RATE=44100`) | a microphone at another rate than 48 kHz, as Windows records: the model still processes it (resampled) |
 | two environments (`tools/two-environments.js`: a worker next to the main thread) | the callbacks of one environment go on working after the other one was torn down (the page loaded again in the same renderer process) |
 | exit with a connection (`tools/exit-with-connection.js`) | Node's environment teardown finalizing a connection that was not destroyed (as when Vesktop restarts) must not abort the renderer ([01](01-architecture.md)) |
 | speaking / silent | the send gate: every packet decrypts; silence = 10 Opus silence frames, then nothing; the remote user is reported as speaking; the ping callback gets the server's answer |

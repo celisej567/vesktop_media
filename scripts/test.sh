@@ -32,6 +32,9 @@ if [ -n "$UNDEF" ]; then echo "unexpected undefined symbols:"; echo "$UNDEF"; ex
 echo "== noise models (RNNoise by default, DeepFilterNet, Standard = libwebrtc's suppression)"
 mkdir -p "$WORK/noise"
 VESKTOP_MEDIA_FAKE_MIC=speech ELECTRON_RUN_AS_NODE=1 timeout 60 "$ELECTRON" tools/noise-models.js "$MODULE" "$WORK/noise" || { echo "FAILED (noise models)"; exit 1; }
+echo "== noise models with a 44.1 kHz microphone (Windows records at the device's rate)"
+mkdir -p "$WORK/noise44"
+VESKTOP_MEDIA_FAKE_MIC=speech VESKTOP_MEDIA_FAKE_MIC_RATE=44100 ELECTRON_RUN_AS_NODE=1 timeout 60 "$ELECTRON" tools/noise-models.js "$MODULE" "$WORK/noise44" || { echo "FAILED (noise models at 44.1 kHz)"; exit 1; }
 echo "== exit with a connection that was not destroyed (Node's teardown finalizes it; once aborted the renderer on restart)"
 mkdir -p "$WORK/exit"
 ELECTRON_RUN_AS_NODE=1 timeout 20 "$ELECTRON" tools/exit-with-connection.js "$MODULE" "$WORK/exit" > /dev/null 2>&1 || { echo "FAILED (exit with a connection)"; exit 1; }

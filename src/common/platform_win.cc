@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <psapi.h>
 
+#include <cstdint>
 #include <filesystem>
 
 namespace vv {
@@ -25,6 +26,15 @@ std::string Narrow(const std::wstring& w)
     std::string s(n, '\0');
     WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
     return s;
+}
+
+bool Windows7()
+{
+    // KUSER_SHARED_DATA, mapped into every process: NtMajorVersion at 0x26c, NtMinorVersion at 0x270
+    const auto* shared = reinterpret_cast<const volatile uint8_t*>(0x7ffe0000);
+    ULONG major = *reinterpret_cast<const volatile ULONG*>(shared + 0x26c);
+    ULONG minor = *reinterpret_cast<const volatile ULONG*>(shared + 0x270);
+    return major == 6 && minor <= 1;
 }
 
 std::filesystem::path PathFromUtf8(const std::string& utf8)

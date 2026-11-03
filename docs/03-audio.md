@@ -73,7 +73,9 @@ Nothing records the microphone while Vesktop is not in a call.
   processing error callback tells JS (code 2). **Standard**, and a model that cannot run (no library, a DeepFilterNet
   state that could not be created) is libwebrtc's suppression: `ApplyProcessing` turns the flag into
   `noiseSuppression` then. Options and model that did not change are not applied again, and the log says what was
-  applied (`processing applied: aec ns agc nc (model, denoiser)`);
+  applied (`processing applied: aec ns agc nc (model, denoiser)`). Both models take 10 ms at 48 kHz; a microphone
+  captured at another rate (Windows records at the device's own format, often 44.1 kHz) is resampled to 48 kHz for
+  the model and back, per channel (the log says so once: `capture at <rate> Hz: the noise model runs on it resampled`);
 * the model can also be **DeepFilterNet** (`audio/deepfilter.cc`, `setNoiseModel(DEEPFILTERNET)`), run at the
   same place on 10 ms mono frames. Creating its state loads the model (about 0.1 s), so that happens on a thread of
   its own and the audio passes unchanged meanwhile; a state is freed away from the audio thread too. A frame costs

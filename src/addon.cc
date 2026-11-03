@@ -850,6 +850,15 @@ Napi::Value VesktopWindowAudioApp(Info info)
 #endif
 }
 
+Napi::Value VesktopSoundshareCable(Info info)
+{
+#ifdef _WIN32
+    return FromJson(info.Env(), SoundshareCable());
+#else
+    return info.Env().Null();
+#endif
+}
+
 Napi::Value VesktopVoiceInfo(Info info)
 {
     auto env = info.Env();
@@ -997,6 +1006,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports)
     fn("vesktopVoiceInfo", VesktopVoiceInfo);
     fn("vesktopListAudioApps", VesktopListAudioApps);
     fn("vesktopWindowAudioApp", VesktopWindowAudioApp);
+    fn("vesktopSoundshareCable", VesktopSoundshareCable);
     return exports;
 }
 

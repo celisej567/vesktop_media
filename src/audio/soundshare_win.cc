@@ -1,6 +1,7 @@
 // Soundshare on Windows: WASAPI process loopback (Windows 10 2004 or newer). Target pid N records that process and
 // its child processes (a browser's or a game launcher's audio comes from children); pid 1 records everything except
-// Vesktop's own processes, so the call itself is never shared. Go Live with a device records that microphone (a
+// Vesktop's own processes, so the call itself is never shared. Windows 7 has no process loopback: there any target
+// records VB-CABLE's "CABLE Output" instead (see audio_apps.h). Go Live with a device records that microphone (a
 // Core Audio capture endpoint). Everything is mixed into 10 ms, 48 kHz stereo frames, as on Linux.
 #include "audio/soundshare.h"
 
@@ -17,6 +18,7 @@
 #include <cstdio>
 #include <deque>
 
+#include "audio/audio_apps.h"
 #include "common/log.h"
 #include "common/platform.h"
 
@@ -291,7 +293,14 @@ void Soundshare::SetPid(uint32_t pid)
         DWORD target = pid == 1 ? OwnRootProcess() : pid;
         std::string error;
         ComPtr<IAudioClient> client;
-        client.p = ActivateLoopback(target, pid != 1, error);
+        const bool cable = Windows7();
+        if (!cable) {
+            client.p = ActivateLoopback(target, pid != 1, error);
+        } else if (auto id = CableRecordingId(); id.empty()) {
+            error = "VB-CABLE is not installed (Windows 7 cannot record single processes)";
+        } else {
+            client.p = ActivateDevice(id, error);
+        }
         // the target process, to notice when it exits (pid 1 records the system: nothing to end)
         HANDLE process = pid == 1 ? nullptr : OpenProcess(SYNCHRONIZE, FALSE, target);
         if (!client) {
@@ -301,8 +310,11 @@ void Soundshare::SetPid(uint32_t pid)
                 if (events_.failed) events_.failed(1, error);
             }
         } else {
-            VV_LOGI("soundshare", "recording %s %lu", pid == 1 ? "everything except" : "process tree of",
-                    static_cast<unsigned long>(target));
+            if (cable)
+                VV_LOGI("soundshare", "recording VB-CABLE");
+            else
+                VV_LOGI("soundshare", "recording %s %lu", pid == 1 ? "everything except" : "process tree of",
+                        static_cast<unsigned long>(target));
             ComPtr<IAudioCaptureClient> capture;
             HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
             if (SUCCEEDED(client->GetService(IID_PPV_ARGS(&capture))) && SUCCEEDED(client->SetEventHandle(event)) &&

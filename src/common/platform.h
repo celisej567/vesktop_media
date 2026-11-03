@@ -32,6 +32,9 @@ std::string ModuleDirectory();
 // UTF-8 <-> UTF-16 for Win32 calls
 std::wstring Widen(const std::string& s);
 std::string Narrow(const std::wstring& w);
+// Windows 7, from the version the kernel itself reports, not from an API a compatibility layer (VxKex) may answer
+// with a newer one
+bool Windows7();
 #endif
 
 // UTF-8 strings <-> filesystem paths (a path made from a narrow string on Windows uses the ANSI code page)

@@ -1,6 +1,7 @@
 // Checks the noise model extension (setNoiseModel, isRnNoiseSupported, isDeepFilterSupported): Discord's noise
 // cancellation flag runs RNNoise by default or DeepFilterNet; Standard is libwebrtc's suppression. Also measures,
 // with a speech-like fake microphone, that each model lowers the noise floor of the processed capture.
+// With VESKTOP_MEDIA_FAKE_MIC_RATE (a capture rate other than 48 kHz) the models must run on it resampled.
 //   ELECTRON_RUN_AS_NODE=1 electron tools/noise-models.js <path to .node> <log directory>
 "use strict";
 const fs = require("fs");
@@ -30,6 +31,18 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 200));
     m.setLoopback(true, { echoCancellation: true, noiseSuppression: false, automaticGainControlConfig: { enabled: true }, noiseCancellation: true });
     await settle();
     assert(/nc=1 \(model 1, denoiser RNNoise\)/.test(lastApplied()), "RNNoise should run: " + lastApplied());
+    // the frames the model actually processed (talkTimeMs): selecting it is not enough
+    await new Promise(resolve => setTimeout(resolve, 500));
+    // (the engine's answer does not keep the process alive: the timer does, and fails the test without one)
+    const stats = JSON.parse(
+        await new Promise(resolve => {
+            const timer = setTimeout(() => fail("no noise cancellation stats"), 2000);
+            m.getNoiseCancellationStats(s => (clearTimeout(timer), resolve(s)));
+        })
+    );
+    assert(stats?.talkTimeMs > 0, "RNNoise processed no frames: " + JSON.stringify(stats));
+    const rate = Number(process.env.VESKTOP_MEDIA_FAKE_MIC_RATE ?? 48000);
+    if (rate !== 48000) assert(log().includes(`capture at ${rate} Hz: the noise model runs on it resampled`), "not resampled for the model");
 
     m.setNoiseModel(m.NoiseModel.DEEPFILTERNET);
     await settle();

@@ -8,6 +8,7 @@
 
 #include <api/audio/audio_device.h>
 #include <api/scoped_refptr.h>
+#include <common_audio/resampler/include/push_resampler.h>
 
 #include <atomic>
 #include <functional>
@@ -165,6 +166,10 @@ private:
     std::atomic<uint64_t> ncFrames_{0}, ncTimeUs_{0};
     std::unique_ptr<RnNoise> rnnoise_[2];
     std::unique_ptr<DeepFilter> deepFilter_[2];
+    // Both models take 10 ms at 48 kHz. Windows records at the device's own rate (often 44.1 kHz), so each channel
+    // goes to 48 kHz for the model and back (audio thread)
+    std::unique_ptr<webrtc::PushResampler<float>> toModel_[2], fromModel_[2];
+    size_t resampledFrames_ = 0;
 };
 
 } // namespace vv

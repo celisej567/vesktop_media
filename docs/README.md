@@ -16,6 +16,7 @@ building, running and testing in short; these pages explain the design.
 | [09 Diagnostics and tests](09-diagnostics.md) | the log and how to read it, the fake SFU and `scripts/test.sh` |
 | [10 Open problems](10-open-problems.md) | what is not solved or not verified yet |
 | [11 Windows](11-windows.md) | the Windows build (clang-cl, Node-API import library), libraries, Core Audio, process loopback soundshare, screen and window capture, cameras, tests |
+| [12 Windows 7](12-windows7.md) | experimental: the regular build under VxKex, detecting Windows 7, stream audio through VB-CABLE, what the user sets up |
 
 ## In one paragraph
 

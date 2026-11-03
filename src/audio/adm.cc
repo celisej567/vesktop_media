@@ -54,16 +54,31 @@ void CaptureAdm::Process(int16_t* samples, size_t frames, size_t channels, uint3
         for (auto& d : deepFilter_)
             if (d) std::thread([old = std::move(d)] {}).detach();
     }
-    if (denoiser == Denoiser::None || rate != 48000 || frames != 480 || channels > 2) {
+    constexpr size_t kMaxFrames = 1920; // 10 ms at 192 kHz
+    if (denoiser == Denoiser::None || channels > 2 || frames > kMaxFrames || frames * 100 != rate) {
         voiceProbability_ = -1;
         return;
+    }
+    const bool resample = frames != 480;
+    if (resample && resampledFrames_ != frames) {
+        for (size_t c = 0; c < 2; c++) {
+            toModel_[c] = std::make_unique<webrtc::PushResampler<float>>(frames, 480, 1);
+            fromModel_[c] = std::make_unique<webrtc::PushResampler<float>>(480, frames, 1);
+        }
+        resampledFrames_ = frames;
+        VV_LOGI("adm", "capture at %u Hz: the noise model runs on it resampled to 48 kHz", rate);
     }
     int64_t t0 = NowUs();
     float prob = 0;
     bool processed = false;
     for (size_t c = 0; c < channels; c++) {
+        float in[kMaxFrames];
         float buf[480];
-        for (size_t i = 0; i < frames; i++) buf[i] = samples[i * channels + c];
+        for (size_t i = 0; i < frames; i++) in[i] = samples[i * channels + c];
+        if (resample)
+            toModel_[c]->Resample(webrtc::MonoView<const float>(in, frames), webrtc::MonoView<float>(buf, 480));
+        else
+            std::copy(in, in + 480, buf);
         if (denoiser == Denoiser::RnNoise) {
             if (!rnnoise_[c]) rnnoise_[c] = std::make_unique<RnNoise>();
             if (!*rnnoise_[c]) {
@@ -78,7 +93,11 @@ void CaptureAdm::Process(int16_t* samples, size_t frames, size_t channels, uint3
             prob = -1; // no speech probability: voice activity falls back to the WebRTC VAD
         }
         processed = true;
-        for (size_t i = 0; i < frames; i++) samples[i * channels + c] = static_cast<int16_t>(std::clamp(buf[i], -32768.0f, 32767.0f));
+        if (resample)
+            fromModel_[c]->Resample(webrtc::MonoView<const float>(buf, 480), webrtc::MonoView<float>(in, frames));
+        else
+            std::copy(buf, buf + 480, in);
+        for (size_t i = 0; i < frames; i++) samples[i * channels + c] = static_cast<int16_t>(std::clamp(in[i], -32768.0f, 32767.0f));
     }
     voiceProbability_ = denoiser == Denoiser::RnNoise ? prob : -1;
     if (!processed) return;
@@ -239,8 +258,9 @@ private:
     {
         using namespace std::chrono;
         auto next = steady_clock::now();
-        int16_t mic[480];
+        int16_t mic[1920];
         int16_t speaker[480 * 2];
+        const int frames = rate_ / 100;
         uint64_t n = 0;
         while (running_) {
             next += milliseconds(10);
@@ -250,13 +270,13 @@ private:
             if (recording_) {
                 // A 440 Hz tone with a 2 Hz tremolo, about -20 dBFS: always "speech" for level based VAD
                 if (!fileSamples_.empty()) {
-                    // VESKTOP_MEDIA_FAKE_MIC=file:<path>: a 48 kHz mono 16-bit WAV, looped
-                    for (int i = 0; i < 480; i++, n++) mic[i] = fileSamples_[n % fileSamples_.size()];
+                    // VESKTOP_MEDIA_FAKE_MIC=file:<path>: a mono 16-bit WAV at the capture rate, looped
+                    for (int i = 0; i < frames; i++, n++) mic[i] = fileSamples_[n % fileSamples_.size()];
                 } else if (speechLike_) {
                     // VESKTOP_MEDIA_FAKE_MIC=speech: a noise floor (about -55 dBFS) with voiced bursts (150 Hz and its
                     // harmonics, 300 ms on, 200 ms off, about -20 dBFS): something the noise suppressors treat as a voice
-                    for (int i = 0; i < 480; i++, n++) {
-                        double t = static_cast<double>(n) / 48000.0;
+                    for (int i = 0; i < frames; i++, n++) {
+                        double t = static_cast<double>(n) / rate_;
                         double phase = std::fmod(t, 0.5);
                         double env = phase < 0.3 ? std::sin(M_PI * phase / 0.3) : 0.0;
                         double voice = 0;
@@ -265,14 +285,14 @@ private:
                         mic[i] = static_cast<int16_t>(std::clamp(2500 * env * voice + 9000 * noise_, -32768.0, 32767.0));
                     }
                 } else {
-                    for (int i = 0; i < 480; i++, n++) {
-                        double t = static_cast<double>(n) / 48000.0;
+                    for (int i = 0; i < frames; i++, n++) {
+                        double t = static_cast<double>(n) / rate_;
                         double env = 0.6 + 0.4 * std::sin(2 * M_PI * 2 * t);
                         mic[i] = static_cast<int16_t>(3200 * env * std::sin(2 * M_PI * 440 * t));
                     }
                 }
                 uint32_t newLevel = 0;
-                transport_->RecordedDataIsAvailable(mic, 480, 2, 1, 48000, 20, 0, 0, false, newLevel);
+                transport_->RecordedDataIsAvailable(mic, frames, 2, 1, rate_, 20, 0, 0, false, newLevel);
             }
             if (playing_) {
                 size_t out = 0;
@@ -282,6 +302,12 @@ private:
         }
     }
 
+    // VESKTOP_MEDIA_FAKE_MIC_RATE: the capture rate (48000 by default), e.g. 44100 as a Windows device may record
+    const int rate_ = [] {
+        const char* env = getenv("VESKTOP_MEDIA_FAKE_MIC_RATE");
+        int rate = env ? atoi(env) : 48000;
+        return rate >= 8000 && rate <= 192000 && rate % 100 == 0 ? rate : 48000;
+    }();
     const bool speechLike_ = getenv("VESKTOP_MEDIA_FAKE_MIC") && std::string(getenv("VESKTOP_MEDIA_FAKE_MIC")) == "speech";
     const std::vector<int16_t> fileSamples_ = [] {
         std::vector<int16_t> samples;
