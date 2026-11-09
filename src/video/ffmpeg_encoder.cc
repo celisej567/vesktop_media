@@ -266,10 +266,15 @@ std::string gPreference = [] {
     return std::string(env && *env ? env : "auto");
 }();
 
+std::mutex gTuningMutex;
+EncoderTuning gTuning;
+std::atomic<int> gTuningGeneration{0}; // an open encoder reopens when it changes
+
 struct Params {
     int width, height, fps;
     int bitrate; // bps
     int keyframeInterval;
+    EncoderTuning tuning;
 };
 
 // Encoder variants for comparisons (scripts and the encoder benchmark), unset in normal use:
@@ -282,10 +287,28 @@ const char* EnvOr(const char* name, const char* fallback)
     return v && *v ? v : fallback;
 }
 
-int BufferSize(int bitrate)
+int BufferSize(int bitrate, int bufferMs)
 {
-    static const double seconds = atof(EnvOr("VESKTOP_MEDIA_ENCODER_VBV", "0.5"));
-    return std::max(static_cast<int>(bitrate * (seconds > 0 ? seconds : 0.5)), 100000);
+    static const double fallback = atof(EnvOr("VESKTOP_MEDIA_ENCODER_VBV", "0.5"));
+    double seconds = bufferMs > 0 ? bufferMs / 1000.0 : (fallback > 0 ? fallback : 0.5);
+    return std::max(static_cast<int>(bitrate * seconds), 100000);
+}
+
+// The preset of each encoder for the user's choice (EncoderTuning::preset); "auto" is ours
+const char* NvencPreset(const std::string& preset)
+{
+    if (preset == "speed") return "p3";
+    if (preset == "balanced") return "p5";
+    if (preset == "quality") return "p7";
+    return EnvOr("VESKTOP_MEDIA_NVENC_PRESET", "p6");
+}
+
+const char* NvencMultipass(const std::string& preset)
+{
+    if (preset == "speed") return "disabled";
+    if (preset == "balanced") return "qres";
+    if (preset == "quality") return "fullres";
+    return EnvOr("VESKTOP_MEDIA_NVENC_MULTIPASS", "fullres");
 }
 
 std::string ErrorText(const Api* api, int rc)
@@ -299,7 +322,23 @@ void* OpenContextOn(const Api* api, const Backend& b, EncodeCodec codec, const P
 
 // Opens an encoder context with our low latency settings; null when it doesn't open (no GPU, driver, …). VA-API:
 // on the first render node it opens on
+void* OpenContextTuned(const Api* api, const Backend& b, EncodeCodec codec, const Params& p);
+
+// The user's tuning first; when the encoder does not open with it (an option this GPU or FFmpeg lacks, such as
+// NVENC's temporal AQ), ours
 void* OpenContext(const Api* api, const Backend& b, EncodeCodec codec, const Params& p)
+{
+    if (void* ctx = OpenContextTuned(api, b, codec, p)) return ctx;
+    const EncoderTuning ours;
+    if (p.tuning.preset == ours.preset && p.tuning.aq == ours.aq && p.tuning.bufferMs == ours.bufferMs) return nullptr;
+    VV_LOGW("video", "%s: does not open with the tuning (preset %s, aq %s, buffer %d ms), opening without it", b.encoder,
+            p.tuning.preset.c_str(), p.tuning.aq.c_str(), p.tuning.bufferMs);
+    Params plain = p;
+    plain.tuning = ours;
+    return OpenContextTuned(api, b, codec, plain);
+}
+
+void* OpenContextTuned(const Api* api, const Backend& b, EncodeCodec codec, const Params& p)
 {
     if (b.kind != Kind::Vaapi) return OpenContextOn(api, b, codec, p, nullptr);
     if (!api->av_vesktop_vaapi_open || !api->av_vesktop_vaapi_send) return nullptr; // a system FFmpeg
@@ -334,15 +373,21 @@ void* OpenContextOn(const Api* api, const Backend& b, EncodeCodec codec, const P
     set("time_base", tb);
     seti("b", p.bitrate);
     seti("maxrate", p.bitrate);
-    seti("bufsize", BufferSize(p.bitrate)); // half a second: few spikes, quick to react
+    // half a second by default: few spikes, quick to react; a longer one lets motion take more bits for a moment
+    seti("bufsize", BufferSize(p.bitrate, p.tuning.bufferMs));
     seti("g", p.keyframeInterval);
     seti("bf", 0); // B-frames add a frame of delay each
     set("forced-idr", "1");
     if (b.kind == Kind::Nvenc) {
         // p6 with a full resolution first pass, as Discord's own encoder for H.265: less blur on motion at the same
         // bitrate (docs/05-video-send.md). Newer presets p1 … p7 with tune ll; FFmpeg < 4.3 knows only the old names
-        if (!set("preset", EnvOr("VESKTOP_MEDIA_NVENC_PRESET", "p6")) || !set("tune", "ll")) set("preset", "llhq");
-        set("multipass", EnvOr("VESKTOP_MEDIA_NVENC_MULTIPASS", "fullres"));
+        if (!set("preset", NvencPreset(p.tuning.preset)) || !set("tune", "ll")) set("preset", "llhq");
+        set("multipass", NvencMultipass(p.tuning.preset));
+        // adaptive quantization: more bits where the eye notices (flat areas, still parts), off by default
+        if (p.tuning.aq == "on") {
+            set("spatial-aq", "1");
+            set("temporal-aq", "1");
+        }
         set("rc", "cbr");
         set("zerolatency", "1");
         set("delay", "0");
@@ -351,8 +396,10 @@ void* OpenContextOn(const Api* api, const Backend& b, EncodeCodec codec, const P
         // low latency usage, the best quality preset, constant bitrate; a requested key frame is an IDR with its
         // parameter sets (forced_idr), and they also come before every periodic one
         set("usage", "lowlatency");
-        set("quality", "quality");
+        const auto& preset = p.tuning.preset;
+        set("quality", preset == "speed" ? "speed" : preset == "balanced" ? "balanced" : "quality");
         set("rc", "cbr");
+        if (p.tuning.aq != "auto") set("vbaq", p.tuning.aq == "on" ? "1" : "0");
         set("latency", "1");
         set("forced_idr", "1");
         if (codec == EncodeCodec::H264) {
@@ -367,6 +414,9 @@ void* OpenContextOn(const Api* api, const Backend& b, EncodeCodec codec, const P
         set("rc_mode", "CBR");
         set("async_depth", "1");
         if (codec == EncodeCodec::H264) set("profile", "high");
+        // the driver's quality level, 1 the best (FFmpeg takes the driver's slowest one above its range); no AQ
+        const auto& preset = p.tuning.preset;
+        if (preset != "auto") seti("compression_level", preset == "quality" ? 1 : preset == "balanced" ? 4 : 7);
         char vendor[256] = {};
         if (int rc = api->av_vesktop_vaapi_open(ctx, p.width, p.height, device, vendor, sizeof(vendor)); rc < 0) {
             VV_LOGI("video", "%s: no VA-API device on %s (%s)", b.encoder, device ? device : "default", ErrorText(api, rc).c_str());
@@ -375,17 +425,22 @@ void* OpenContextOn(const Api* api, const Backend& b, EncodeCodec codec, const P
         }
         VV_LOGI("video", "%s: VA-API driver on %s: %s", b.encoder, device ? device : "default", vendor);
     } else if (codec == EncodeCodec::H264) {
-        set("preset", "veryfast");
+        const auto& preset = p.tuning.preset;
+        set("preset", preset == "speed" ? "superfast" : preset == "quality" ? "fast" : "veryfast");
         set("tune", "zerolatency");
         set("profile", "high");
+        if (p.tuning.aq != "auto") set("aq-mode", p.tuning.aq == "on" ? "variance" : "none");
         set("threads", "0");
         // SPS / PPS before every key frame (a viewer joining needs them); Annex B is FFmpeg's default
         set("x264-params", "repeat-headers=1:nal-hrd=none");
     } else {
-        set("preset", "superfast");
+        const auto& preset = p.tuning.preset;
+        set("preset", preset == "speed" ? "ultrafast" : preset == "quality" ? "veryfast" : "superfast");
         set("tune", "zerolatency");
         set("threads", "0");
-        set("x265-params", "repeat-headers=1:log-level=error");
+        std::string params = "repeat-headers=1:log-level=error";
+        if (p.tuning.aq != "auto") params += p.tuning.aq == "on" ? ":aq-mode=2" : ":aq-mode=0";
+        set("x265-params", params.c_str());
     }
     if (int rc = api->avcodec_open2(ctx, enc, nullptr); rc < 0) {
         // FFmpeg's own message, the reason, is in the log right before (ffmpeg: …)
@@ -446,6 +501,8 @@ public:
         params_.bitrate = std::max(100, static_cast<int>(settings->startBitrate)) * 1000;
         // a key frame on request (PLI) and every 60 s otherwise
         params_.keyframeInterval = params_.fps * 60;
+        tuningGeneration_ = gTuningGeneration.load();
+        params_.tuning = GetEncoderTuning();
         return Open() ? WEBRTC_VIDEO_CODEC_OK : WEBRTC_VIDEO_CODEC_ERROR;
     }
 
@@ -473,6 +530,12 @@ public:
             // the source changed size (adaptation, another window): a new stream with a key frame
             params_.width = w;
             params_.height = h;
+            if (!Open()) return WEBRTC_VIDEO_CODEC_ERROR;
+        }
+        if (int generation = gTuningGeneration.load(); generation != tuningGeneration_) {
+            // the user changed the tuning: a new encoder with it (and a key frame)
+            tuningGeneration_ = generation;
+            params_.tuning = GetEncoderTuning();
             if (!Open()) return WEBRTC_VIDEO_CODEC_ERROR;
         }
         if (pendingBitrate_ > 0) ApplyBitrate();
@@ -590,8 +653,9 @@ private:
         openFps_ = std::max(1, params_.fps);
         havePts_ = false; // a new encoder starts its timestamps again
         rtpUnwrapped_ = 0;
-        VV_LOGI("video", "%s: %dx%d @ %d, %d kbit/s", backend_->encoder, params_.width, params_.height, params_.fps,
-                params_.bitrate / 1000);
+        VV_LOGI("video", "%s: %dx%d @ %d, %d kbit/s, preset %s, aq %s, buffer %d ms", backend_->encoder, params_.width,
+                params_.height, params_.fps, params_.bitrate / 1000, params_.tuning.preset.c_str(),
+                params_.tuning.aq.c_str(), params_.tuning.bufferMs);
         return frame_ && packet_;
     }
 
@@ -608,7 +672,7 @@ private:
         // libx264 and nvenc pick the new rate up on the next frame (x264_encoder_reconfig / NVENC reconfigure)
         api_->av_opt_set_int(ctx_, "b", params_.bitrate, 0);
         api_->av_opt_set_int(ctx_, "maxrate", params_.bitrate, 0);
-        api_->av_opt_set_int(ctx_, "bufsize", BufferSize(params_.bitrate), 0);
+        api_->av_opt_set_int(ctx_, "bufsize", BufferSize(params_.bitrate, params_.tuning.bufferMs), 0);
     }
 
     const Api* api_;
@@ -627,6 +691,7 @@ private:
     int64_t lastPts_ = 0;
     int openFps_ = 30; // the time base of the open encoder: 1/openFps_
     int64_t lastReopenMs_ = 0;
+    int tuningGeneration_ = 0;
     int errors_ = 0;
 };
 
@@ -640,6 +705,32 @@ void SetEncoderPreference(const std::string& preference)
     for (const char* k : kKnown)
         if (preference == k) gPreference = k;
     VV_LOGI("video", "encoder preference: %s", gPreference.c_str());
+}
+
+void SetEncoderTuning(const EncoderTuning& tuning)
+{
+    auto pick = [](const std::string& v, std::initializer_list<const char*> known) {
+        for (const char* k : known)
+            if (v == k) return std::string(k);
+        return std::string("auto");
+    };
+    EncoderTuning t;
+    t.preset = pick(tuning.preset, {"auto", "speed", "balanced", "quality"});
+    t.aq = pick(tuning.aq, {"auto", "on", "off"});
+    t.bufferMs = tuning.bufferMs > 0 ? std::clamp(tuning.bufferMs, 100, 5000) : 0;
+    {
+        std::lock_guard lock(gTuningMutex);
+        if (t.preset == gTuning.preset && t.aq == gTuning.aq && t.bufferMs == gTuning.bufferMs) return;
+        gTuning = t;
+    }
+    gTuningGeneration++;
+    VV_LOGI("video", "encoder tuning: preset %s, aq %s, buffer %d ms", t.preset.c_str(), t.aq.c_str(), t.bufferMs);
+}
+
+EncoderTuning GetEncoderTuning()
+{
+    std::lock_guard lock(gTuningMutex);
+    return gTuning;
 }
 
 std::string EncoderPreference()

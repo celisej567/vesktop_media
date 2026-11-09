@@ -129,7 +129,7 @@ private:
         webrtc::VideoReceiveStreamInterface* stream = nullptr;
         std::unique_ptr<RemoteVideoSink> sink;
         json decoders; // videoDecoders it was created with
-        webrtc::RepeatingTaskHandle watchdog; // key frame requests until the first frame
+        webrtc::RepeatingTaskHandle watchdog; // key frame requests until the first frame, then the receive line
     };
 
     struct RemoteUser {
@@ -157,7 +157,7 @@ private:
     void ApplyGains(RemoteUser& user);
     void UpdateVideoStreams(RemoteUser& user, bool recreate);
     void DestroyVideoStreams(RemoteUser& user);
-    void OnVideoSeen(uint32_t ssrc);
+    void OnVideoSeen(uint32_t ssrc, bool silent = false);
     void SetVideoSendOptions(const json& options); // JS thread, from setTransportOptions
     webrtc::Transport* RtpTransport();
     void UpdateVideoSend();        // worker

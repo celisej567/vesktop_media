@@ -19,6 +19,18 @@ enum class EncodeCodec { H264, H265 };
 void SetEncoderPreference(const std::string& preference);
 std::string EncoderPreference();
 
+// The user's encoder tuning (Vesktop extension setVideoEncoderTuning), for H.264 / H.265:
+// preset "auto" (ours) | "speed" | "balanced" | "quality"; aq (adaptive quantization) "auto" (the encoder's default)
+// | "on" | "off"; bufferMs: the rate control buffer, 0 = ours (half a second). An encoder that is open reopens
+// with it (a key frame)
+struct EncoderTuning {
+    std::string preset = "auto";
+    std::string aq = "auto";
+    int bufferMs = 0;
+};
+void SetEncoderTuning(const EncoderTuning& tuning);
+EncoderTuning GetEncoderTuning();
+
 bool FfmpegCanEncode(EncodeCodec codec);
 // The FFmpeg encoder that would be used ("h264_nvenc", "libx264"…), "" if none
 std::string FfmpegEncoderName(EncodeCodec codec);

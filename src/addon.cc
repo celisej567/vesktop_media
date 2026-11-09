@@ -98,7 +98,8 @@ std::vector<std::string> SupportedFeatures()
             // video send
             "set_video_device_by_id",
             // Vesktop extensions (Discord's JS knows nothing of them): getVideoInputDeviceCapabilities, setVideoInputDeviceOptions,
-            // getNativeScreenSharePickedSource, setVideoEncoderPreference, getVideoEncoders, setNoiseModel, transport options
+            // getNativeScreenSharePickedSource, setVideoEncoderPreference, setVideoEncoderTuning, getVideoEncoders,
+            // setNoiseModel, transport options
             // vesktopVideoBitrate / vesktopAudioBitrate
             "vesktop_device_options", "vesktop_noise_models",
 #ifdef _WIN32
@@ -569,6 +570,19 @@ Napi::Value SetVideoEncoderPreference(Info info)
     return info.Env().Undefined();
 }
 
+// Vesktop extension: setVideoEncoderTuning({preset, aq, bufferMs}) for H.264 / H.265 (EncoderTuning in
+// video/ffmpeg_encoder.h); a stream that is running takes it on its next frame
+Napi::Value SetVideoEncoderTuning(Info info)
+{
+    json o = ToJson(Arg(info, 0));
+    EncoderTuning t;
+    t.preset = Get<std::string>(o, "preset", "auto");
+    t.aq = Get<std::string>(o, "aq", "auto");
+    t.bufferMs = Get(o, "bufferMs", 0);
+    SetEncoderTuning(t);
+    return info.Env().Undefined();
+}
+
 // Vesktop extension: getVideoEncoders() = {h264, h265, preference, available}: the FFmpeg encoder each would use
 // ("" = none), the preference, and every encoder that opens here ([{name, family, codec}], family "nvenc" / "amf" /
 // "vaapi" / "software")
@@ -925,6 +939,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports)
     fn("setVideoInputDeviceOptions", SetVideoInputDeviceOptions);
     fn("getNativeScreenSharePickedSource", GetNativeScreenSharePickedSource);
     fn("setVideoEncoderPreference", SetVideoEncoderPreference);
+    fn("setVideoEncoderTuning", SetVideoEncoderTuning);
     fn("getVideoEncoders", GetVideoEncoders);
     fn("setNoiseModel", SetNoiseModel);
     fn("getNoiseModel", GetNoiseModel);

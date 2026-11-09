@@ -58,6 +58,7 @@ minidumps in `~/.config/vesktop/Crashpad` (`crashReporter`, nothing is uploaded)
 | `video: h264_vaapi: VA-API driver on /dev/dri/renderD128: <vendor>` / `does not open at WxH (<error>)` | the VA driver in use (e.g. Mesa's radeonsi), and an encoder that did not open |
 | `video: ffmpeg … (avcodec …): h264=1 h265=1` | which FFmpeg decodes what |
 | `video: waiting for a frame from <user> ssrc …: packets, pt, frames key / delta, decoded` | a remote video that shows nothing yet (key frame watchdog) |
+| `video: receive <user> ssrc …: WxH, pt N (decoder), K kbit/s, F fps decoded / R rendered, QP Q, … dropped, … freezes, … packets lost, … NACK, … PLI` | every 5 s per remote video once it shows: what the sender sends and what was lost on the way. `QP` is the average quantizer of the frames in those 5 s (H.264 / H.265 0–51, VP8 / VP9 0–127; `?` when the decoder does not report it): a high one is detail the sender's encoder left out, which no decoder brings back |
 | `portal: Portal picker: node_id=…, source type 2, app <desktop file>` | what the system picker returned |
 | `pipewire: format: 2560x1440, video format 8, 60/1 fps` | the negotiated capture format |
 | `pipewire: capture ended: source closed` | the window / output went away |
@@ -87,7 +88,7 @@ needs no Discord servers, uses fake capture and sends traffic only to 127.0.0.1.
 
 Options: `--seconds`, `--vad <dB>`, `--video VP8|H264|H265`, `--recv-video`, `--late-join`, `--layers 2`,
 `--wants-late`, `--js-inactive`, `--switch-camera`, `--golive-camera`, `--screen <node>`, `--expect-source-end`, `--soundshare <pid>`,
-`--video-bitrate <bps>`, `--dave-reset`, `--real-audio`, `--trace`, `--clip-dir <dir>`. Environment of the module for tests:
+`--video-bitrate <bps>`, `--tuning <preset>,<aq>,<bufferMs>`, `--dave-reset`, `--real-audio`, `--trace`, `--clip-dir <dir>`. Environment of the module for tests:
 `VESKTOP_MEDIA_PIPEWIRE_NODE`, `VESKTOP_MEDIA_ENCODER`, `VESKTOP_MEDIA_LOG_STDERR`, and for the fake microphone
 `VESKTOP_MEDIA_FAKE_MIC=speech` (noise floor and voiced bursts) or `file:<mono 16-bit WAV>` (looped, at the capture
 rate), and `VESKTOP_MEDIA_FAKE_MIC_RATE` (its capture rate, 48000 by default).
@@ -106,6 +107,7 @@ Runs against `build/out/vesktop_media.node`:
 | two environments (`tools/two-environments.js`: a worker next to the main thread) | the callbacks of one environment go on working after the other one was torn down (the page loaded again in the same renderer process) |
 | exit with a connection (`tools/exit-with-connection.js`) | Node's environment teardown finalizing a connection that was not destroyed (as when Vesktop restarts) must not abort the renderer ([01](01-architecture.md)) |
 | speaking / silent | the send gate: every packet decrypts; silence = 10 Opus silence frames, then nothing; the remote user is reported as speaking; the ping callback gets the server's answer |
+| `--tuning quality,on,1500` (x264) | the encoder tuning: H.264 opens with it, reopens without it mid-stream and goes on sending |
 | `--dave-reset` | a transition that turns DAVE off without an MLS group: the JS thread stays responsive |
 | receive VP8 / H.264 / H.265, H.264 joined mid-stream | decoders; the key frame watchdog |
 | send camera, `--wants-late`, `--js-inactive`, two layers | the encoder idles until viewers ask; layers forced active; simulcast |

@@ -23,12 +23,19 @@ encrypted. `FrameDecryptor` passes frames through unchanged while DAVE is off, s
 **The key frame watchdog.** A receive stream created after the sender's last key frame (a late join, or a stream
 recreated by `setDisableLocalVideo`) shows nothing until the next key frame, and libwebrtc does not ask for one while
 nothing has been decrypted yet (a consequence of the required frame encryption). Each stream therefore requests a key
-frame every second until its first frame is rendered, and logs what it has received in the meantime.
+frame every second until its first frame is rendered, and logs what it has received in the meantime. From the
+first frame on, the same task logs the stream's quality every 5 s (resolution, bitrate, frame rates, average QP,
+losses, [09](09-diagnostics.md)). The FFmpeg decoder reads each frame's QP from its slice headers with libwebrtc's
+H.264 / H.265 bitstream parsers (FFmpeg does not hand it out); libvpx and dav1d report it themselves.
 
 ## Callbacks
 
 * **video**: on the first RTP packet of an ssrc, `(userId, ssrc, streamId, …)`; the stream id is the ssrc as a
-  string. JS then attaches a sink to that id.
+  string. JS then attaches a sink to that id. An ssrc without a packet 2 s after its stream was created is
+  reported as well, unless another ssrc of the same user already was. Go Live asks the SFU for a stream
+  (`GoLiveQualityManager`, op 15) with the pixel count of the element that shows it, and that element exists only
+  once JS has a stream id. A streamer who stops and starts again on a stream connection that stays open gets a new
+  ssrc, and the SFU sends no packets for it until it is reported. Its audio arrives regardless.
 * **first frame**: when the first decoded frame is rendered, with the size in the log.
 * For our own user the same callback carries the self video report ([05](05-video-send.md)).
 

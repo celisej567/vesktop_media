@@ -64,6 +64,32 @@ bool IsRtcp(const uint8_t* p, size_t n)
     return n >= 8 && (p[0] >> 6) == 2 && p[1] >= 200 && p[1] <= 206;
 }
 
+// A remote video's counters at the last receive line
+struct ReceiveTotals {
+    uint32_t decoded = 0, dropped = 0, freezes = 0, nacks = 0, plis = 0;
+    uint64_t qpSum = 0;
+    int lost = 0;
+};
+
+// Every 5 s per remote video: what arrives (the sender's resolution, bitrate and quantizer: a high average QP is
+// detail the sender's encoder left out, which no decoder brings back) and what was lost on the way
+void LogVideoReceive(const std::string& userId, uint32_t ssrc, const webrtc::VideoReceiveStreamInterface::Stats& s,
+                     ReceiveTotals& last)
+{
+    uint32_t decoded = s.frames_decoded - last.decoded;
+    uint64_t qpSum = s.qp_sum.value_or(0);
+    std::string qp = s.qp_sum && decoded ? std::to_string((qpSum - last.qpSum) / decoded) : "?";
+    VV_LOGI("video", "receive %s ssrc %u: %dx%d, pt %d (%s), %d kbit/s, %d fps decoded / %d rendered, QP %s, "
+                     "%u dropped, %u freezes, %d packets lost, %u NACK, %u PLI",
+            userId.c_str(), ssrc, s.width, s.height, s.current_payload_type,
+            s.decoder_implementation_name.value_or("?").c_str(), s.total_bitrate_bps / 1000, s.decode_frame_rate,
+            s.render_frame_rate, qp.c_str(), s.frames_dropped - last.dropped, s.freeze_count - last.freezes,
+            s.rtp_stats.packets_lost - last.lost, s.rtcp_packet_type_counts.nack_packets - last.nacks,
+            s.rtcp_packet_type_counts.pli_packets - last.plis);
+    last = {s.frames_decoded, s.frames_dropped, s.freeze_count, s.rtcp_packet_type_counts.nack_packets,
+            s.rtcp_packet_type_counts.pli_packets, qpSum, s.rtp_stats.packets_lost};
+}
+
 } // namespace
 
 // ------------------------------------------------------------------------------------------ MediaTransport
@@ -533,12 +559,20 @@ void Connection::UpdateVideoStreams(RemoteUser& user, bool recreate)
         vs.stream->Start();
         // A stream that missed the sender's key frame (created after it, or recreated by setDisableLocalVideo)
         // shows nothing until the next one, and libwebrtc does not ask for it while nothing has been decrypted
-        // (require_frame_encryption). Ask every second until a frame is rendered
+        // (require_frame_encryption). Ask every second until a frame is rendered; from then on the stream's
+        // quality goes to the log every 5 s
         vs.watchdog = webrtc::RepeatingTaskHandle::DelayedStart(
             Engine::Get().Worker(), webrtc::TimeDelta::Millis(300),
-            [stream = vs.stream, sink = vs.sink.get(), id = user.id, ssrc, tick = 0]() mutable {
-                if (sink->Rendered()) return webrtc::TimeDelta::PlusInfinity();
+            [this, stream = vs.stream, sink = vs.sink.get(), id = user.id, ssrc, tick = 0, last = ReceiveTotals{}]() mutable {
+                if (sink->Rendered()) {
+                    LogVideoReceive(id, ssrc, stream->GetStats(), last);
+                    return webrtc::TimeDelta::Seconds(5);
+                }
                 auto s = stream->GetStats();
+                // Go Live asks the SFU for the stream with the pixel count of the element that shows it, and the
+                // element appears only once the video callback gave JS a stream id: a stream that starts again on
+                // a connection that is still open stays without packets until it is reported
+                if (tick == 2 && s.rtp_stats.packet_counter.packets == 0) OnVideoSeen(ssrc, true);
                 if (tick++ % 5 == 0)
                     VV_LOGI("video", "waiting for a frame from %s ssrc %u: %u packets, pt %d, frames %d key / %d delta, %u decoded",
                             id.c_str(), ssrc, static_cast<unsigned>(s.rtp_stats.packet_counter.packets), s.current_payload_type,
@@ -560,17 +594,25 @@ void Connection::DestroyVideoStreams(RemoteUser& user)
     user.video.clear();
 }
 
-// First RTP packet of a remote video stream (worker thread): JS learns the stream id to attach a sink to
-void Connection::OnVideoSeen(uint32_t ssrc)
+// First RTP packet of a remote video stream (worker thread): JS learns the stream id to attach a sink to.
+// `silent`: no packet 2 s after the stream was created; reported only while no other ssrc of the user is
+void Connection::OnVideoSeen(uint32_t ssrc, bool silent)
 {
     std::string userId;
     {
         std::lock_guard lock(usersMutex_);
         auto it = videoSsrcs_.find(ssrc);
-        if (it == videoSsrcs_.end() || !videoSeen_.insert(ssrc).second) return;
+        if (it == videoSsrcs_.end()) return;
+        if (silent) {
+            auto user = users_.find(it->second);
+            if (user == users_.end()) return;
+            for (auto v : user->second.videoSsrcs)
+                if (videoSeen_.count(v)) return;
+        }
+        if (!videoSeen_.insert(ssrc).second) return;
         userId = it->second;
     }
-    VV_LOGI("video", "video from %s ssrc %u", userId.c_str(), ssrc);
+    VV_LOGI("video", silent ? "video from %s ssrc %u announced, no packets yet" : "video from %s ssrc %u", userId.c_str(), ssrc);
     callbacks.video.Call([userId, ssrc](Napi::Env env) {
         return JsCallback::Args{Napi::String::New(env, userId), Napi::Number::New(env, ssrc),
                                 Napi::String::New(env, std::to_string(ssrc)), env.Undefined()};
@@ -764,7 +806,7 @@ void Connection::DestroyUser(const std::string& userId)
         DestroyVideoStreams(it->second);
         ForgetVideoSsrcs(it->second, {});
         users_.erase(it);
-        VV_LOGI("conn", "user %s removed", userId.c_str());
+        VV_LOGI("conn", "user %s removed (%s)", userId.c_str(), context_.c_str());
     });
 }
 

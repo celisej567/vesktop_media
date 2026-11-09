@@ -124,6 +124,7 @@ are hidden.
 | `setVideoInputDeviceOptions(id, options)` | saved camera options (applied at start-up), a device stream's options |
 | `getNativeScreenSharePickedSource()` | screen or window, and the window's application, to preselect its audio |
 | `setVideoEncoderPreference(pref)`, `getVideoEncoders()` | the H.264 / H.265 encoder setting under the engine select, and what is in use |
+| `setVideoEncoderTuning({preset, aq, bufferMs})` | the encoder's preset, adaptive quantization and rate control buffer, under the encoder setting ([05](05-video-send.md)) |
 | `setNoiseModel(model)`, `getNoiseModel()`, `NoiseModel`, `isRnNoiseSupported()`, `isDeepFilterSupported()` | the noise suppression choice of Voice & Video settings, see below |
 | transport options `vesktopVideoBitrate`, `vesktopAudioBitrate` (bit/s, 0 = Discord's) | the stream settings' bitrates |
 | `setGoLiveDevices({videoInputDeviceId, audioInputDeviceId})` | part of Discord's API too; the microphone id is one of our input device names |
@@ -153,6 +154,6 @@ DeepFilterNet), and the Krisp advertisement and the text under the list (replace
 are left out. A choice dispatches what Discord's own setting does (the
 noise cancellation flag, and the suppression the other way) and selects the model.
 
-Settings Vesktop stores for this engine: `voiceEngine`, `nativeVoiceVideoEncoder`, `nativeVoiceDeviceOptions`
+Settings Vesktop stores for this engine: `voiceEngine`, `nativeVoiceVideoEncoder`, `nativeVoiceVideoTuning`, `nativeVoiceDeviceOptions`
 (per camera guid), `nativeVoiceNoiseModel`, `nativeVoiceAppSettings` (the module's own settings) and, in its renderer state,
 `nativeScreenshareQuality` (resolution, frame rate, content type, video and audio bitrate).

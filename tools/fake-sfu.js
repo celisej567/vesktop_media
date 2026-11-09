@@ -74,6 +74,10 @@ const NO_DESTROY = args.includes("--no-destroy");
 const GOLIVE_CAMERA = args.includes("--golive-camera");
 // --video-bitrate <bps>: Vesktop's override (transport option vesktopVideoBitrate) on the Go Live camera
 const VIDEO_BITRATE = opt("--video-bitrate");
+// --tuning <preset>,<aq>,<bufferMs> (quality,on,1500): setVideoEncoderTuning before the call, and the plain tuning again 1.5 s into the video (a running
+// encoder must reopen with it and go on sending)
+const TUNING = opt("--tuning");
+let framesAtTuning = null;
 // --soundshare <pid>: with --golive-camera, share that process's audio (setTransportOptions soundsharePid); the
 // reflected audio must come back with sound in it
 const SOUNDSHARE_PID = opt("--soundshare");
@@ -357,6 +361,10 @@ sock.bind(0, "127.0.0.1", () => {
         useFakeAudioCapture: !args.includes("--real-audio"), // --real-audio: the real microphone
         useFakeVideoCapture: true
     });
+    if (TUNING) {
+        const [preset, aq, bufferMs] = TUNING.split(",");
+        voice.setVideoEncoderTuning({ preset, aq, bufferMs: Number(bufferMs) });
+    }
 
     voice.rankRtcRegions([{ region: "local", ips: [`127.0.0.1:${port}`] }], ranked =>
         log("rankRtcRegions ->", JSON.stringify(ranked))
@@ -493,6 +501,12 @@ sock.bind(0, "127.0.0.1", () => {
                                 conn.setTransportOptions({ remoteSinkWantsPixelCount: 921600, remoteSinkWantsMaxFramerate: 30 });
                             }, 1500);
                         conn.setVideoBroadcast(true);
+                        if (TUNING)
+                            setTimeout(() => {
+                                framesAtTuning = video.frames;
+                                log("tuning back to auto: frames so far", video.frames);
+                                voice.setVideoEncoderTuning({ preset: "auto", aq: "auto", bufferMs: 0 });
+                            }, 1500);
                         if (SWITCH_CAMERA)
                             setTimeout(() => {
                                 cameraSwitchedAt = Date.now();
@@ -539,7 +553,7 @@ sock.bind(0, "127.0.0.1", () => {
                                 return w > 0 && h > 0 && w <= 1280 && h <= 720;
                             };
                             const sizeOk = SCREEN_NODE ? fitted(video.size) : video.size === size;
-                            videoOk = video.frames >= 10 && sizeOk && video.nonBlack && video.firstFrame != null && v?.framesDecoded > 0;
+                            videoOk = videoOk && video.frames >= 10 && sizeOk && video.nonBlack && video.firstFrame != null && v?.framesDecoded > 0;
                             if (WANTS_LATE) {
                                 log("late wants:", JSON.stringify({ selfVideoActive, videoPacketsBeforeWants: wantsAt, total: counts.rtp[VIDEO_PT] }));
                                 videoOk = videoOk && selfVideoActive === true && wantsAt === 0;
@@ -554,6 +568,11 @@ sock.bind(0, "127.0.0.1", () => {
                             const after = framesAtCodecSwitch === null ? 0 : video.frames - framesAtCodecSwitch;
                             log("codec switch:", JSON.stringify({ framesBefore: framesAtCodecSwitch, framesAfter: after }));
                             videoOk = videoOk && framesAtCodecSwitch > 0 && after >= 10;
+                        }
+                        if (TUNING) {
+                            const after = framesAtTuning === null ? 0 : video.frames - framesAtTuning;
+                            log("tuning:", JSON.stringify({ framesBefore: framesAtTuning, framesAfter: after }));
+                            videoOk = videoOk && framesAtTuning > 0 && after >= 10;
                         }
                         if (SWITCH_CAMERA) {
                             log("camera switch:", cameraSwitchedMs === null ? "not sent" : `${cameraSwitchedMs} ms`);

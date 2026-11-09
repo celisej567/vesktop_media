@@ -97,6 +97,10 @@ try {
     Check 'camera switch|outbound video|video sink' @('--seconds', '4', '--video', 'VP8', '--switch-camera') | Out-Null
     Write-Host '== video codec changed during the call: the recreated stream starts its layers again'
     Check 'codec switch|outbound video' @('--seconds', '4', '--video', 'VP8', '--switch-codec') | Out-Null
+    Write-Host '== encoder tuning (preset, AQ, buffer): H.264 opens with it, and reopens without it mid-stream and goes on'
+    $env:VESKTOP_MEDIA_ENCODER = 'software'
+    Check 'tuning|outbound video' @('--seconds', '4', '--video', 'H264', '--tuning', 'quality,on,1500') | Out-Null
+    Remove-Item Env:VESKTOP_MEDIA_ENCODER
     Write-Host '== Go Live with a device (setGoLiveDevices, fake camera)'
     Check 'outbound video|video sink' @('--seconds', '3', '--video', 'VP8', '--golive-camera') | Out-Null
     # soundshare: a 440 Hz tone played by a process of its own, shared by its pid (process loopback). Needs an audio

@@ -126,6 +126,28 @@ families that open here, from `getVideoEncoders().available` (every working enco
   most every 3 s;
 * it reports no QP, so libwebrtc's QP-based quality scaler is off for it.
 
+### Tuning
+
+`setVideoEncoderTuning({preset, aq, bufferMs})` (Vesktop's settings under the encoder choice) overrides three of
+these for H.264 / H.265. `auto` (and buffer 0) is what is described above. Each encoder maps them to its own options:
+
+| | `speed` | `balanced` | `quality` |
+|---|---|---|---|
+| NVENC preset, multipass | p3, off | p5, quarter resolution | p7, full resolution |
+| AMF `quality` | speed | balanced | quality |
+| VA-API `compression_level` (the driver's quality level, 1 the best) | 7 | 4 | 1 |
+| x264 preset | superfast | veryfast | fast |
+| x265 preset | ultrafast | superfast | veryfast |
+
+* **aq** (adaptive quantization: bits move to where the eye notices, flat and still areas): `on` / `off` is NVENC's
+  `spatial-aq` + `temporal-aq` (off by default), AMF's `vbaq`, x264's `aq-mode` (variance / none; variance is its
+  default), x265's `aq-mode` 2 / 0. FFmpeg's VA-API encoders have none;
+* **bufferMs**: the rate control buffer (`bufsize`), 100 to 5000 ms, 500 by default. A longer one lets a burst of
+  motion take more bits for a moment, at the cost of bigger bitrate spikes on the wire;
+* a change reaches a running encoder on its next frame: it reopens with the new tuning (a key frame). An encoder that
+  does not open with the tuning (an option the GPU or FFmpeg lacks: older NVIDIA GPUs have no temporal AQ) opens with
+  ours, and says so in the log. The `video: <encoder>: WxH @ fps, kbit/s` line names the tuning in use.
+
 ## Sharp and smooth
 
 Discord's "Content Type" for a stream ("Prefer Clarity" / "Prefer Smoothness") arrives as the degradation

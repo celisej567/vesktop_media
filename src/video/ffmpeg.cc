@@ -2,6 +2,8 @@
 
 #include <api/video/i420_buffer.h>
 #include <api/video/video_frame.h>
+#include <common_video/h264/h264_bitstream_parser.h>
+#include <common_video/h265/h265_bitstream_parser.h>
 #include <modules/video_coding/include/video_error_codes.h>
 
 #include <cstring>
@@ -209,6 +211,16 @@ public:
             return WEBRTC_VIDEO_CODEC_ERROR;
         }
 
+        // The frame's quantizer, for the receive stats (qp_sum): how much detail the sender's encoder kept
+        std::optional<uint8_t> qp;
+        if (codec_ == FfmpegCodec::H264) {
+            h264Parser_.ParseBitstream({input.data(), input.size()});
+            if (auto q = h264Parser_.GetLastSliceQp(); q && *q >= 0 && *q <= 51) qp = static_cast<uint8_t>(*q);
+        } else {
+            h265Parser_.ParseBitstream({input.data(), input.size()});
+            if (auto q = h265Parser_.GetLastSliceQp(); q && *q >= 0 && *q <= 51) qp = static_cast<uint8_t>(*q);
+        }
+
         bool got = false;
         while (api_->avcodec_receive_frame(ctx_, frame_) == 0) {
             auto* f = static_cast<AvFrameHead*>(frame_);
@@ -220,7 +232,7 @@ public:
                                  .set_rtp_timestamp(input.RtpTimestamp())
                                  .set_color_space(input.ColorSpace() ? std::optional(*input.ColorSpace()) : std::nullopt)
                                  .build();
-                callback_->Decoded(frame, std::nullopt, std::nullopt);
+                callback_->Decoded(frame, std::nullopt, qp);
                 got = true;
             } else if (!warnedFormat_) {
                 warnedFormat_ = true;
@@ -260,6 +272,8 @@ private:
     void* packet_ = nullptr;
     void* frame_ = nullptr;
     std::vector<uint8_t> buffer_;
+    webrtc::H264BitstreamParser h264Parser_;
+    webrtc::H265BitstreamParser h265Parser_;
     webrtc::DecodedImageCallback* callback_ = nullptr;
     bool warnedFormat_ = false;
     int errors_ = 0;

@@ -83,6 +83,8 @@ echo "== the selected camera changed during a call: the call sends the new one a
 check "camera switch|outbound video|video sink" --seconds 4 --video VP8 --switch-camera
 echo "== video codec changed during the call: the recreated stream starts its layers again"
 check "codec switch|outbound video" --seconds 4 --video VP8 --switch-codec
+echo "== encoder tuning (preset, AQ, buffer): H.264 opens with it, and reopens without it mid-stream and goes on"
+VESKTOP_MEDIA_ENCODER=software check "tuning|outbound video" --seconds 4 --video H264 --tuning quality,on,1500
 echo "== Go Live with a device (setGoLiveDevices, fake camera)"
 check "outbound video|video sink" --seconds 3 --video VP8 --golive-camera
 
